@@ -25,6 +25,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let loginItem = LoginItem()
     private var statusItem: StatusItemController?
     private var settingsWindow: SettingsWindow?
+    /// Lid events between sessions: the lid hook and auto-start on lid close.
+    private var idleLid: IdleLidWatcher?
     private var terminating = false
 
     override init() {
@@ -85,6 +87,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             settings?.show()
         }
         Task { await manager.reconcile() }
+        let watcher = IdleLidWatcher(manager: manager)
+        watcher.start()
+        idleLid = watcher
     }
 
     /// Quitting always ends the session (spec 1). Terminate is deferred until

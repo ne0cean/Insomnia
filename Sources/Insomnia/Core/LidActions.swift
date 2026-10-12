@@ -133,6 +133,7 @@ final class LidActions {
             manager.pauseCountdown()
         }
         if !ran { Log.error("lid close actions skipped: recovery lock busy") }
+        runHook(closed: true, manager: manager)
     }
 
     func onOpen() async {
@@ -141,11 +142,22 @@ final class LidActions {
             return
         }
         await manager.undoLidActions()
+        runHook(closed: false, manager: manager)
         guard manager.isActive, !Task.isCancelled else { return }
         manager.resumeCountdown()
     }
 
     // MARK: Private
+
+    /// The user's lid hook for an event inside a session, after this
+    /// event's actions (or undo) are done. In a task of its own, so a slow
+    /// or failing script never holds up the next lid event. Between
+    /// sessions `IdleLidWatcher` runs it instead.
+    private func runHook(closed: Bool, manager: SessionManager) {
+        let script = manager.config.lidHookScript
+        guard !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        Task.detached { await LidHook.run(script: script, closed: closed, sessionActive: true) }
+    }
 
     /// The answer of `probe`, or nil as soon as a lid event after `event`
     /// arrives (or one already has). The probe then runs on in its own task
