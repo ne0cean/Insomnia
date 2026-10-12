@@ -2,10 +2,12 @@
 
 The [README](../README.md#optional-extras) has a summary of each.
 
-## iPhone hotspot handoff
+## Phone hotspot handoff (iPhone or Android)
 
-Set **System Settings → Wi-Fi → Ask to join hotspots → Automatically**, then
-enter the hotspot SSID and password in Insomnia Settings. The password is
+Enter the hotspot SSID and password in Insomnia Settings. Any phone works,
+iPhone or Android: Insomnia joins the network by name like any other Wi-Fi.
+With an iPhone, also set **System Settings → Wi-Fi → Ask to join hotspots →
+Automatically**; an Android hotspot has to be switched on on the phone. The password is
 stored in the login Keychain under service `insomnia-hotspot`. Insomnia uses
 CoreWLAN to find and join that network without putting the password in process
 arguments.

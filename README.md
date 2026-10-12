@@ -110,6 +110,15 @@ file and explains how upgrades replace them.
 
 You don't have to close the lid, and opening it doesn't end the session.
 
+- **Auto-start.** Settings > Lid hook and auto-start can start a session
+  whenever the lid closes with none running (off by default, 10 hours).
+- **URL scheme.** `open -g "insomnia://start?hours=8"` (also `extend`, `end`,
+  `status`) drives the app from scripts; `scripts/insomnia-ctl.sh start 8h`
+  wraps it.
+- **Lid hook.** A script path in the same section runs on every lid close and
+  open with `closed|open active|idle` as arguments and in `INSOMNIA_LID` and
+  `INSOMNIA_SESSION`, stopped after 20 seconds.
+
 On battery power, Insomnia turns on Low Power Mode below 40% and ends the
 session below 10%. Those are the defaults. You can change both in Settings,
 and an end floor of 0 turns the battery end off. The heat rules turn on Low Power
@@ -175,11 +184,12 @@ alone. [docs/recovery.md](docs/recovery.md) explains each case.
 ## Optional extras
 
 <details>
-<summary><strong>iPhone hotspot handoff and tmux</strong></summary>
+<summary><strong>Phone hotspot handoff (iPhone or Android) and tmux</strong></summary>
 
-If the Wi-Fi drops during a session, Insomnia can join your iPhone's hotspot.
-Set System Settings > Wi-Fi > Ask to join hotspots to Automatically, then enter
-the hotspot's name and password in Insomnia's Settings. The password stays in
+If the Wi-Fi drops during a session, Insomnia can join your phone's hotspot,
+iPhone or Android. Enter the hotspot's name and password in Insomnia's
+Settings. With an iPhone, also set System Settings > Wi-Fi > Ask to join
+hotspots to Automatically; an Android hotspot only needs to be turned on. The password stays in
 your login Keychain. Insomnia asks for Location Services access, because
 macOS requires it to read Wi-Fi network names. It never reads your location.
 After you reinstall Insomnia, enter the password again.
