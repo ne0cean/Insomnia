@@ -92,6 +92,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         idleLid = watcher
     }
 
+    /// `insomnia://` URLs (`URLCommand`). Launch Services starts the app
+    /// first when it is not running, so a script can start a session from
+    /// cold. A start while a session is active is ignored, as from the menu.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            guard let command = URLCommand.parse(url) else {
+                Log.error("url scheme: ignored \(url.absoluteString)")
+                continue
+            }
+            handle(command)
+        }
+    }
+
+    private func handle(_ command: URLCommand) {
+        switch command {
+        case let .start(seconds):
+            guard !manager.isActive else {
+                Log.info("url scheme: start ignored: a session is already active; use extend")
+                return
+            }
+            let duration = seconds ?? manager.config.defaultPreset
+            Log.info("url scheme: start for \(Int(duration)) s")
+            Task { await manager.start(duration: duration) }
+        case let .extend(seconds):
+            guard manager.isActive else {
+                Log.info("url scheme: extend ignored: no session")
+                return
+            }
+            Log.info("url scheme: extend by \(Int(seconds)) s")
+            Task { await manager.extend(by: seconds) }
+        case .end:
+            guard manager.isActive else {
+                Log.info("url scheme: end ignored: no session")
+                return
+            }
+            Log.info("url scheme: end")
+            Task { _ = await manager.end(reason: .user) }
+        case .status:
+            if let session = manager.session {
+                Log.info("url scheme: status: session active until \(session.endsAt.formatted(.iso8601))")
+            } else {
+                Log.info("url scheme: status: no session")
+            }
+        }
+    }
+
     /// Quitting always ends the session (spec 1). Terminate is deferred until
     /// the end has run. A second quit while that is pending is refused rather
     /// than allowed through: `.terminateNow` there would exit mid-cleanup.
