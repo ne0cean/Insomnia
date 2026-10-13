@@ -1180,6 +1180,8 @@ final class SessionManager {
             return
         }
         let ticket = endTicket
+        startsInFlight += 1
+        defer { startsInFlight -= 1 }
         _ = await exclusive("start") { await self.performStart(duration: duration, ticket: ticket) }
         // A start that goes through before a refused launch reconcile runs
         // again drops that reconcile, and takes over its check.
@@ -1278,6 +1280,10 @@ final class SessionManager {
     /// Cleared by every end. Not persisted: after a relaunch it is an
     /// ordinary short session.
     @ObservationIgnored private(set) var standby = false
+    /// Starts requested and not yet finished (queued or running). An end
+    /// from a script that arrives meanwhile is for the session they will
+    /// make, not a no-op (`perform(_:)`).
+    @ObservationIgnored private(set) var startsInFlight = 0
 
     /// `start`, and mark the session as standby if it started.
     func startStandby(duration: TimeInterval) async {
@@ -1301,15 +1307,16 @@ final class SessionManager {
     /// The lid closed during standby: the session becomes the auto-start
     /// session, extended so it ends `config.effectiveAutoStartDuration`
     /// from now. Nothing to do when the session is not a standby one.
-    func promoteStandby() async {
+    func promoteStandby(to target: TimeInterval? = nil) async {
         guard standby, let s = session else { return }
         standby = false
-        let extra = config.effectiveAutoStartDuration - s.remaining(at: clock())
+        let length = target ?? config.effectiveAutoStartDuration
+        let extra = length - s.remaining(at: clock())
         guard extra > 0 else {
-            Log.info("lid closed during standby: session already runs past the auto-start duration")
+            Log.info("standby promoted: session already runs past \(Int(length)) s")
             return
         }
-        Log.info("lid closed during standby: extending the session by \(Int(extra)) s to the auto-start duration")
+        Log.info("standby promoted: extending the session by \(Int(extra)) s to \(Int(length)) s")
         await extend(by: extra)
     }
 
@@ -1330,7 +1337,9 @@ final class SessionManager {
     /// Freeze the countdown where it stands. Ignored without a session or
     /// when already paused.
     func pause() async {
-        guard session != nil, !isPaused else { return }
+        // No pre-check outside the queue: a pause sent while a start is
+        // still in flight must wait for it, not be dropped (performPause
+        // checks under the queue).
         let ticket = endTicket
         _ = await exclusive("pause") { await self.performPause(ticket: ticket) }
     }
@@ -1388,7 +1397,8 @@ final class SessionManager {
     /// written is now plus the frozen remaining: at most one roll earlier
     /// than the one on disk, and a deadline moving in is always safe.
     func resume() async {
-        guard isPaused else { return }
+        // Checked under the queue (performResume), so a resume sent right
+        // after a pause still in flight is not dropped.
         let ticket = endTicket
         _ = await exclusive("resume") { await self.performResume(ticket: ticket) }
     }
@@ -1415,13 +1425,17 @@ final class SessionManager {
     }
 
     func extend(by extra: TimeInterval) async {
-        guard session != nil else { return }
+        // Checked under the queue (performExtend): an extend sent while a
+        // start is in flight applies to the session it makes.
         let ticket = endTicket
         _ = await exclusive("extend") { await self.performExtend(by: extra, ticket: ticket) }
     }
 
     private func performExtend(by extra: TimeInterval, ticket: Int) async {
         guard let current = session, endTicket == ticket else { return }
+        // An explicit extension is a session the user wants kept: it no
+        // longer ends quietly as a standby, and the lid close leaves it alone.
+        standby = false
         let updated = SessionMath.extended(current, by: extra, now: clock(), maxDuration: config.maxDuration)
         // The agent enforces whatever deadline is on disk; confirm it is
         // still loaded before moving that deadline out.

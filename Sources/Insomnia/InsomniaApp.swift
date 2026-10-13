@@ -110,51 +110,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Each command goes to the manager, which decides in its own order
+    /// (`SessionManager.perform`); nothing is pre-checked here against a
+    /// session state a queued command is about to change.
     private func handle(_ command: URLCommand) {
-        switch command {
-        case let .start(seconds):
-            guard !manager.isActive else {
-                Log.info("url scheme: start ignored: a session is already active; use extend")
-                return
-            }
-            let duration = seconds ?? manager.config.defaultPreset
-            Log.info("url scheme: start for \(Int(duration)) s")
-            Task { await manager.start(duration: duration) }
-        case let .extend(seconds):
-            guard manager.isActive else {
-                Log.info("url scheme: extend ignored: no session")
-                return
-            }
-            Log.info("url scheme: extend by \(Int(seconds)) s")
-            Task { await manager.extend(by: seconds) }
-        case .end:
-            guard manager.isActive else {
-                Log.info("url scheme: end ignored: no session")
-                return
-            }
-            Log.info("url scheme: end")
-            Task { _ = await manager.end(reason: .user) }
-        case .pause:
-            guard manager.isActive else {
-                Log.info("url scheme: pause ignored: no session")
-                return
-            }
-            Log.info("url scheme: pause")
-            Task { await manager.pause() }
-        case .resume:
-            guard manager.isPaused else {
-                Log.info("url scheme: resume ignored: not paused")
-                return
-            }
-            Log.info("url scheme: resume")
-            Task { await manager.resume() }
-        case .status:
-            if let session = manager.session {
-                Log.info("url scheme: status: session active until \(session.endsAt.formatted(.iso8601))")
-            } else {
-                Log.info("url scheme: status: no session")
-            }
-        }
+        Task { await manager.perform(command) }
     }
 
     /// Quitting always ends the session (spec 1). Terminate is deferred until
