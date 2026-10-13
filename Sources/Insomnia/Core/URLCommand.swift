@@ -7,6 +7,8 @@ import Foundation
 ///     insomnia://start?hours=8         or ?seconds=28800
 ///     insomnia://extend?hours=1        or ?seconds=3600
 ///     insomnia://end
+///     insomnia://pause                 freeze the countdown (sleep stays held)
+///     insomnia://resume                let it run again
 ///     insomnia://status                writes the session state to the log
 ///
 /// A duration is one of `seconds` or `hours`, positive and finite; giving
@@ -18,6 +20,8 @@ enum URLCommand: Equatable, Sendable {
     case start(TimeInterval?)
     case extend(TimeInterval)
     case end
+    case pause
+    case resume
     case status
 
     /// Pure: the command `url` names, or nil for anything else.
@@ -39,6 +43,10 @@ enum URLCommand: Equatable, Sendable {
             return .extend(seconds)
         case "end":
             return .end
+        case "pause":
+            return .pause
+        case "resume":
+            return .resume
         case "status":
             return .status
         default:

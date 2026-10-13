@@ -4,6 +4,8 @@
 #   insomnia-ctl.sh start [DURATION]   start a session (default preset without DURATION)
 #   insomnia-ctl.sh extend DURATION    extend the running session
 #   insomnia-ctl.sh end                end the running session
+#   insomnia-ctl.sh pause              freeze the countdown (sleep stays held)
+#   insomnia-ctl.sh resume             let the countdown run again
 #   insomnia-ctl.sh status             write the session state to insomnia.log
 #
 # DURATION is 8h, 30m, 28800s or plain seconds (28800).
@@ -13,7 +15,7 @@
 set -eu
 
 usage() {
-  echo "usage: $(basename "$0") start [DURATION] | extend DURATION | end | status" >&2
+  echo "usage: $(basename "$0") start [DURATION] | extend DURATION | end | pause | resume | status" >&2
   echo "DURATION: 8h, 30m, 28800s or 28800 (seconds)" >&2
   exit 2
 }
@@ -56,7 +58,7 @@ case "$cmd" in
     s=$(seconds "$1") || usage
     url="insomnia://extend?seconds=$s"
     ;;
-  end | status)
+  end | pause | resume | status)
     [ $# -eq 0 ] || usage
     url="insomnia://$cmd"
     ;;

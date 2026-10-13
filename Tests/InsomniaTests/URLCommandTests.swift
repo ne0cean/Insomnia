@@ -43,6 +43,12 @@ final class URLCommandTests: XCTestCase {
         XCTAssertEqual(parse("insomnia://status"), .status)
     }
 
+    func testPauseAndResume() {
+        XCTAssertEqual(parse("insomnia://pause"), .pause)
+        XCTAssertEqual(parse("insomnia://resume"), .resume)
+        XCTAssertNil(parse("insomnia://pause?seconds=5"), "pause takes no duration")
+    }
+
     func testOtherSchemesAndCommandsAreRefused() {
         XCTAssertNil(parse("https://start?hours=1"))
         XCTAssertNil(parse("insomnia://quit"))

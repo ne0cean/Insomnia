@@ -1306,6 +1306,102 @@ final class SessionManager {
         await extend(by: extra)
     }
 
+    // MARK: Pause
+
+    /// The seconds the countdown stood at when the session was paused, nil
+    /// while it runs. A paused session keeps sleep held with the countdown
+    /// standing still: the deadline on disk is rolled forward every
+    /// `pauseRollInterval` to now plus this, so the recovery agent and a
+    /// relaunch always see a deadline at most one roll past the frozen
+    /// remaining, never an open-ended hold. Not persisted: a relaunch
+    /// resumes the countdown from the rolled deadline. Every end clears it.
+    @ObservationIgnored private(set) var pausedRemaining: TimeInterval?
+    var isPaused: Bool { pausedRemaining != nil }
+    static let pauseRollInterval: TimeInterval = 60
+    @ObservationIgnored private var pauseRollTimer: Timer?
+
+    /// Freeze the countdown where it stands. Ignored without a session or
+    /// when already paused.
+    func pause() async {
+        guard session != nil, !isPaused else { return }
+        let ticket = endTicket
+        _ = await exclusive("pause") { await self.performPause(ticket: ticket) }
+    }
+
+    private func performPause(ticket: Int) async {
+        guard let current = session, endTicket == ticket, !isPaused else { return }
+        // The agent enforces whatever deadline is on disk; confirm it is
+        // still loaded before that deadline starts moving out.
+        do {
+            try await backstop.arm()
+        } catch {
+            fail("could not confirm backstop: \(error.localizedDescription)")
+            return
+        }
+        guard endTicket == ticket, session == current else { return }
+        let remaining = current.remaining(at: clock())
+        pausedRemaining = remaining
+        // A paused standby is a session the user wants kept, not one the
+        // lid close should reshape.
+        standby = false
+        Log.info("session paused with \(Int(remaining)) s left")
+        rollPausedDeadline()
+        let timer = Timer(timeInterval: Self.pauseRollInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.rollPausedDeadline() }
+        }
+        timer.tolerance = 5
+        RunLoop.main.add(timer, forMode: .common)
+        pauseRollTimer = timer
+    }
+
+    /// Move the deadline on disk to now plus the frozen remaining (never past
+    /// `config.maxDuration` from now). Internal so a test can roll without
+    /// waiting out the interval. A write that fails leaves the earlier
+    /// deadline, which the next roll or the resume tries again.
+    func rollPausedDeadline() {
+        guard var updated = session, let remaining = pausedRemaining else { return }
+        let now = clock()
+        updated.endsAt = now.addingTimeInterval(min(remaining, config.maxDuration))
+        do {
+            try store.saveSession(updated)
+        } catch {
+            Log.error("paused session: could not roll the deadline: \(error.localizedDescription)")
+            return
+        }
+        session = updated
+        Task { await armDeadline(updated.endsAt) }
+    }
+
+    /// Let the countdown run again from where it was frozen. The deadline
+    /// written is now plus the frozen remaining: at most one roll earlier
+    /// than the one on disk, and a deadline moving in is always safe.
+    func resume() async {
+        guard isPaused else { return }
+        let ticket = endTicket
+        _ = await exclusive("resume") { await self.performResume(ticket: ticket) }
+    }
+
+    private func performResume(ticket: Int) async {
+        guard var updated = session, let remaining = pausedRemaining, endTicket == ticket else { return }
+        updated.endsAt = clock().addingTimeInterval(remaining)
+        do {
+            try store.saveSession(updated)
+        } catch {
+            fail("could not write session: \(error.localizedDescription)")
+            return
+        }
+        stopPauseRoll()
+        pausedRemaining = nil
+        session = updated
+        Log.info("session resumed with \(Int(remaining)) s left, until \(iso(updated.endsAt))")
+        await armDeadline(updated.endsAt)
+    }
+
+    private func stopPauseRoll() {
+        pauseRollTimer?.invalidate()
+        pauseRollTimer = nil
+    }
+
     func extend(by extra: TimeInterval) async {
         guard session != nil else { return }
         let ticket = endTicket
@@ -1396,6 +1492,7 @@ final class SessionManager {
         countdownPaused = false
         session = nil
         standby = false
+        pausedRemaining = nil
         // Every lid action is undone from the journal below, or by the
         // retry of this end, and Low Power Mode restored from it: a lid
         // event refused earlier, a settle pass waiting to run again and
@@ -2928,10 +3025,12 @@ final class SessionManager {
             countdownText = ""
             return
         }
-        let remaining = s.remaining(at: clock())
+        // Paused: the frozen remaining, not the rolled deadline's.
+        let remaining = pausedRemaining ?? s.remaining(at: clock())
         let minute = SessionMath.formatRemaining(remaining)
         if remainingText != minute { remainingText = minute }
-        let second = SessionMath.formatCountdown(remaining: remaining, shape: s.countdownShape)
+        let digits = SessionMath.formatCountdown(remaining: remaining, shape: s.countdownShape)
+        let second = isPaused ? Self.pausedCountdownPrefix + digits : digits
         if countdownText != second { countdownText = second }
     }
 
@@ -2966,6 +3065,12 @@ final class SessionManager {
         let timer = Timer(fire: endsAt, interval: 0, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 guard let self, let s = self.session, s.isExpired(at: self.clock()) else { return }
+                // A paused session whose rolled deadline passed (the roll
+                // timer did not run, say across a sleep) is rolled, not ended.
+                if self.isPaused {
+                    self.rollPausedDeadline()
+                    return
+                }
                 await self.end(reason: self.standby ? .standbyExpired : .timer)
             }
         }
@@ -2997,11 +3102,15 @@ final class SessionManager {
         countdownTimer = timer
     }
 
+    /// What the status item shows before the digits while paused.
+    static let pausedCountdownPrefix = "\u{23F8} "
+
     private func stopTimers() {
         deadlineTimer?.invalidate()
         deadlineTimer = nil
         countdownTimer?.invalidate()
         countdownTimer = nil
+        stopPauseRoll()
     }
 
     private func persistState(_ s: RuntimeState) throws {

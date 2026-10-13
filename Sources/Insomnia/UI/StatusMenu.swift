@@ -23,6 +23,9 @@ enum StatusMenu {
             /// save the item was built for, its save ID included, so a
             /// later one is not dropped.
             case stopWaitingForOutput(SavedAudioOutput)
+            /// Freeze the running session's countdown, or let a frozen one
+            /// run again (`SessionManager.pause` / `resume`).
+            case togglePause
         }
 
         let title: String
@@ -31,6 +34,8 @@ enum StatusMenu {
 
     static let settingsTitle = "Settings\u{2026}"
     static let quitTitle = "Quit Insomnia"
+    static let pauseTitle = "Pause countdown"
+    static let resumeTitle = "Resume countdown"
 
     /// Disabled status lines, a separator, then Settings… and Quit. Empty
     /// lines are dropped, and the separator only appears when something
@@ -46,9 +51,14 @@ enum StatusMenu {
     /// `outputsWaiting` are output devices still muted from a lid close
     /// because they were not connected to get their volume back; each gets
     /// a line and an item to stop waiting for it.
+    /// `paused` is nil with no session; otherwise whether the countdown is
+    /// frozen, which puts "Pause countdown" or "Resume countdown" right
+    /// above Settings…, since pausing is the one thing the item itself does
+    /// not offer (its ring only ends).
     static func items(
         sessionActive: Bool,
         sleepHeld: Bool,
+        paused: Bool? = nil,
         machine: String?,
         actions: String?,
         throttledBrowsers: [ThrottledBrowser],
@@ -109,6 +119,9 @@ enum StatusMenu {
         if !out.isEmpty {
             out.append(Item(title: "", kind: .separator))
         }
+        if sessionActive, let paused {
+            out.append(Item(title: paused ? resumeTitle : pauseTitle, kind: .togglePause))
+        }
         out.append(Item(title: settingsTitle, kind: .settings))
         out.append(Item(title: quitTitle, kind: .quit))
         return out
@@ -129,7 +142,8 @@ enum StatusMenu {
         settings: Selector,
         quit: Selector,
         relaunchBrowser: Selector,
-        stopWaitingForOutput: Selector
+        stopWaitingForOutput: Selector,
+        togglePause: Selector? = nil
     ) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -161,6 +175,9 @@ enum StatusMenu {
                 let entry = action(title: item.title, selector: stopWaitingForOutput, key: "", target: target)
                 entry.representedObject = waiting
                 menu.addItem(entry)
+            case .togglePause:
+                guard let togglePause else { continue }
+                menu.addItem(action(title: item.title, selector: togglePause, key: "p", target: target))
             }
         }
         return menu

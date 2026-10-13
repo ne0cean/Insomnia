@@ -134,6 +134,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             Log.info("url scheme: end")
             Task { _ = await manager.end(reason: .user) }
+        case .pause:
+            guard manager.isActive else {
+                Log.info("url scheme: pause ignored: no session")
+                return
+            }
+            Log.info("url scheme: pause")
+            Task { await manager.pause() }
+        case .resume:
+            guard manager.isPaused else {
+                Log.info("url scheme: resume ignored: not paused")
+                return
+            }
+            Log.info("url scheme: resume")
+            Task { await manager.resume() }
         case .status:
             if let session = manager.session {
                 Log.info("url scheme: status: session active until \(session.endsAt.formatted(.iso8601))")

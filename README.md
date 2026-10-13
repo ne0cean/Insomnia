@@ -118,9 +118,14 @@ You don't have to close the lid, and opening it doesn't end the session.
   unplugged or the hotspot SSID comes into Wi-Fi range on battery, and the
   lid close then extends it to the auto-start duration. A standby whose lid
   stays open ends quietly.
+- **Pause.** Right-click the eye > Pause countdown (⌘P) freezes the
+  countdown where it stands while sleep stays held; Resume countdown lets it
+  run again. The deadline on disk is rolled forward every minute while
+  paused, so the recovery agent never sees an open-ended hold, and a
+  relaunch resumes the countdown.
 - **URL scheme.** `open -g "insomnia://start?hours=8"` (also `extend`, `end`,
-  `status`) drives the app from scripts; `scripts/insomnia-ctl.sh start 8h`
-  wraps it.
+  `pause`, `resume`, `status`) drives the app from scripts;
+  `scripts/insomnia-ctl.sh start 8h` wraps it.
 - **Lid hook.** A script path in the same section runs on every lid close and
   open with `closed|open active|idle` as arguments and in `INSOMNIA_LID` and
   `INSOMNIA_SESSION`, stopped after 20 seconds. It is run through the
