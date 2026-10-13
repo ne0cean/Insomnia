@@ -99,8 +99,25 @@ final class LidHookTests: XCTestCase {
         XCTAssertEqual(LidHook.interpreter(of: "#!/usr/bin/env -S python3 -u"), ["/usr/bin/env", "-S python3 -u"], "the rest of the line is one argument")
         XCTAssertEqual(LidHook.interpreter(of: "echo hi"), ["/bin/sh"], "no shebang")
         XCTAssertEqual(LidHook.interpreter(of: ""), ["/bin/sh"])
-        XCTAssertEqual(LidHook.interpreter(of: "#!bash"), ["/bin/sh"], "a relative interpreter is not run")
-        XCTAssertEqual(LidHook.interpreter(of: "#!/bin/sh A=1"), ["/bin/sh"], "an argument env would read as a variable is dropped")
+        XCTAssertNil(LidHook.interpreter(of: "#!bash"), "a relative interpreter is refused, not replaced by sh")
+        XCTAssertNil(LidHook.interpreter(of: "#!/bin/A=B/sh"), "a program path env would read as a variable")
+        XCTAssertEqual(LidHook.interpreter(of: "#!/usr/bin/env -S FOO=1 python3"), ["/usr/bin/env", "-S FOO=1 python3"], "= in the argument is fine: env has seen the program by then")
+    }
+
+    /// A shebang that names no absolute interpreter is skipped: the script
+    /// is not handed to /bin/sh, which it was not written for.
+    func testRunSkipsAScriptWithAnUnusableShebang() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lidhook-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = dir.appendingPathComponent("out.txt")
+        let script = dir.appendingPathComponent("hook.sh")
+        try TestScripts.write("""
+        #!bash
+        touch "\(out.path)"
+        """, to: script)
+        await LidHook.run(script: script.path, closed: true, sessionActive: false)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: out.path))
     }
 
     func testTildeIsExpanded() throws {

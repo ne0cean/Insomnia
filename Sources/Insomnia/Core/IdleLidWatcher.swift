@@ -61,7 +61,13 @@ final class IdleLidWatcher {
         Log.info("lid closed with no session: starting one for \(Int(duration)) s (auto-start on lid close)")
         Task { @MainActor in
             await manager.start(duration: duration)
-            if !manager.isActive { Log.error("auto-start on lid close: the session did not start") }
+            if !manager.isActive {
+                Log.error("auto-start on lid close: the session did not start")
+            } else if manager.standby {
+                // The start was ignored because a standby start was already in
+                // flight when the lid closed: that session is the one to extend.
+                await manager.promoteStandby()
+            }
         }
     }
 }

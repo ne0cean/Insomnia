@@ -159,19 +159,70 @@ final class StandbyArmerTests: XCTestCase {
         await armer.scanOnce()
         await waitUntil("no standby session started") { m.isActive }
         XCTAssertTrue(m.standby)
-        XCTAssertEqual(armer.lastArmedFor, "hotspot The blade is in range")
+        XCTAssertEqual(armer.lastArmedFor, "hotspot The blade came into range")
 
         // With a session running the scan is skipped altogether.
         await armer.scanOnce()
         XCTAssertEqual(range.asked.count, 2)
         _ = await m.end(reason: .user)
 
+        // A hotspot left on does not re-arm standby after that session: it
+        // has to go out of range and come back (the edge, as for the charger).
+        await armer.scanOnce()
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertFalse(m.isActive, "re-armed on a hotspot that never went away")
+        range.visible = false
+        await armer.scanOnce()
+        range.visible = true
+        await armer.scanOnce()
+        await waitUntil("the hotspot coming back did not arm") { m.isActive }
+        _ = await m.end(reason: .user)
+
         // On the charger the scan does not run either.
         reading.charging = true
         power.refreshBattery()
+        let before = range.asked.count
         await armer.scanOnce()
-        XCTAssertEqual(range.asked.count, 2)
+        XCTAssertEqual(range.asked.count, before)
         XCTAssertFalse(m.isActive)
+    }
+
+    /// At or below the end floor the floor rules would end a standby at
+    /// once, with a notification each time: it is not started.
+    func testBatteryAtTheEndFloorDoesNotArm() async throws {
+        XCTAssertTrue(StandbyArmer.batteryAllows(config: configOn(), percent: 11))
+        XCTAssertFalse(StandbyArmer.batteryAllows(config: configOn(), percent: 10), "endFloor is 10 by default")
+        XCTAssertTrue(StandbyArmer.batteryAllows(config: configOn(), percent: nil), "no reading does not block")
+        var noFloor = configOn()
+        noFloor.endFloor = 0
+        XCTAssertTrue(StandbyArmer.batteryAllows(config: noFloor, percent: 1))
+
+        let m = h.makeManager()
+        m.config = configOn()
+        let reading = Reading()
+        let power = PowerMonitor(reader: { (.percent(8), reading.charging) })
+        power.refreshBattery()
+        let armer = StandbyArmer(manager: m, power: power, lidClosed: { false }, scan: { _ in false })
+        armer.powerChanged()
+        reading.charging = false
+        power.refreshBattery()
+        armer.powerChanged()
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertFalse(m.isActive)
+    }
+
+    /// Unplug, then close the lid within seconds: the close can land while
+    /// the standby start is still in flight. The start honours it itself.
+    func testStandbyStartedUnderAClosedLidIsPromotedAtOnce() async {
+        let m = h.makeManager()
+        m.config = configOn()
+        m.config.autoStartDuration = 8 * 3600
+        h.clamshell.closed = true
+        await m.startStandby(duration: 1800)
+        XCTAssertTrue(m.isActive)
+        XCTAssertFalse(m.standby, "promoted")
+        XCTAssertEqual(m.session.map { $0.endsAt.timeIntervalSince(h.clock.now) }, 8 * 3600)
+        _ = await m.end(reason: .user)
     }
 
     /// A standby that runs out with the lid open ends without the "Time is

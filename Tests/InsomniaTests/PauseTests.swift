@@ -48,6 +48,36 @@ final class PauseTests: XCTestCase {
         XCTAssertFalse(m.isPaused)
     }
 
+    /// An extension typed while paused goes into the frozen remaining, so
+    /// the next roll and the resume carry it instead of overwriting it.
+    func testExtendWhilePausedIsKept() async {
+        let m = h.makeManager()
+        await m.start(duration: 3600)
+        await m.pause()
+        XCTAssertEqual(m.pausedRemaining, 3600)
+        await m.extend(by: 1800)
+        XCTAssertEqual(m.pausedRemaining, 5400)
+        m.rollPausedDeadline()
+        XCTAssertEqual(m.session?.endsAt, h.clock.now.addingTimeInterval(5400))
+        await m.resume()
+        XCTAssertEqual(m.session?.endsAt, h.clock.now.addingTimeInterval(5400))
+        _ = await m.end(reason: .user)
+    }
+
+    /// The deadline written while paused is never closer than two roll
+    /// intervals: the recovery agent judges it with no grace.
+    func testRollKeepsTheDeadlineAtLeastTwoIntervalsOut() async throws {
+        let m = h.makeManager()
+        await m.start(duration: 3600)
+        h.clock.advance(3600 - 30)
+        await m.pause()
+        XCTAssertEqual(m.pausedRemaining, 30)
+        XCTAssertEqual(try XCTUnwrap(m.store.loadSession()).endsAt, h.clock.now.addingTimeInterval(2 * SessionManager.pauseRollInterval))
+        await m.resume()
+        XCTAssertEqual(m.session?.endsAt, h.clock.now.addingTimeInterval(30), "the resume writes the real remaining")
+        _ = await m.end(reason: .user)
+    }
+
     func testPauseAndResumeWithoutASessionDoNothing() async {
         let m = h.makeManager()
         await m.pause()

@@ -43,6 +43,15 @@ final class URLCommandTests: XCTestCase {
         XCTAssertEqual(parse("insomnia://status"), .status)
     }
 
+    /// A URL any page can open must not be able to crash the app: a
+    /// duration past a year is refused before `Int(…)` ever sees it.
+    func testAbsurdDurationsAreRefused() {
+        XCTAssertNil(parse("insomnia://start?hours=1e300"))
+        XCTAssertNil(parse("insomnia://start?seconds=1e19"))
+        XCTAssertNil(parse("insomnia://extend?hours=9000"))
+        XCTAssertEqual(parse("insomnia://start?hours=720"), .start(720 * 3600), "30 days is still a duration")
+    }
+
     func testPauseAndResume() {
         XCTAssertEqual(parse("insomnia://pause"), .pause)
         XCTAssertEqual(parse("insomnia://resume"), .resume)

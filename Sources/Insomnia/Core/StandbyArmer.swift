@@ -35,6 +35,11 @@ final class StandbyArmer {
     private let scan: HotspotScan
     private let scanInterval: Duration
     private var wasCharging: Bool?
+    /// The hotspot was in range at the last scan that ran. Standby arms on
+    /// the edge (not seen, then seen), as the charger path arms on the
+    /// unplug: a hotspot left on at the desk must not re-arm standby every
+    /// scan after the previous one ran out.
+    private var hotspotSeen = false
     private var scanLoop: Task<Void, Never>?
     private(set) var lastArmedFor: String?
 
@@ -69,6 +74,14 @@ final class StandbyArmer {
     nonisolated static func scans(config: Config, active: Bool, lidClosed: Bool?, charging: Bool) -> Bool {
         applies(config: config, active: active, lidClosed: lidClosed) && !charging
             && !HotspotSSID.normalized(config.hotspotSSID).isEmpty
+    }
+
+    /// Pure: whether the battery allows a standby to start. At or below the
+    /// end floor the floor rules would end it at once, with a notification
+    /// each time; nil (no reading) does not block.
+    nonisolated static func batteryAllows(config: Config, percent: Int?) -> Bool {
+        guard config.endFloor > 0, let percent else { return true }
+        return percent > config.endFloor
     }
 
     func start() {
@@ -107,14 +120,21 @@ final class StandbyArmer {
         let config = manager.config
         guard Self.scans(config: config, active: manager.isActive, lidClosed: lidClosed(), charging: power.isCharging) else { return }
         let ssid = HotspotSSID.normalized(config.hotspotSSID)
-        guard await scan(ssid) else { return }
+        let visible = await scan(ssid)
+        let appeared = visible && !hotspotSeen
+        hotspotSeen = visible
+        guard appeared else { return }
         // Re-read after the await: a session may have started meanwhile.
         guard let manager = self.manager, Self.applies(config: manager.config, active: manager.isActive, lidClosed: lidClosed()) else { return }
-        arm("hotspot \(ssid) is in range")
+        arm("hotspot \(ssid) came into range")
     }
 
     private func arm(_ reason: String) {
         guard let manager else { return }
+        guard Self.batteryAllows(config: manager.config, percent: power.percent) else {
+            Log.info("standby: \(reason), but the battery is at or below the end floor; not holding sleep")
+            return
+        }
         let duration = manager.config.effectiveStandbyDuration
         lastArmedFor = reason
         Log.info("standby: \(reason); holding sleep for \(Int(duration)) s ahead of the lid close")

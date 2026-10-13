@@ -50,25 +50,28 @@ enum LidHook {
 
     /// Pure: the interpreter a script's first line names, as the kernel
     /// would run it: the absolute path after `#!` and, if anything follows
-    /// it, the rest of the line as one argument. `defaultInterpreter` when
-    /// the line is not a `#!` line, names no absolute path, or the path or
-    /// argument contains `=` (env would read it as a variable).
-    static func interpreter(of firstLine: String) -> [String] {
+    /// it, the rest of the line as one argument (`#!/usr/bin/env -S FOO=1
+    /// python3` keeps its `=`: env has already seen the program by then).
+    /// `defaultInterpreter` when the line is not a `#!` line. nil when the
+    /// `#!` line names no absolute path, or one containing `=`: such a
+    /// script is skipped rather than run by a shell it was not written for.
+    static func interpreter(of firstLine: String) -> [String]? {
         guard firstLine.hasPrefix("#!") else { return defaultInterpreter }
         let rest = firstLine.dropFirst(2).trimmingCharacters(in: .whitespaces)
         let parts = rest.split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "\t" })
-        guard let program = parts.first, program.hasPrefix("/"), !program.contains("=") else { return defaultInterpreter }
+        guard let program = parts.first, program.hasPrefix("/"), !program.contains("=") else { return nil }
         var result = [String(program)]
         if parts.count == 2 {
             let argument = parts[1].trimmingCharacters(in: .whitespaces)
-            if !argument.isEmpty, !argument.contains("=") { result.append(argument) }
+            if !argument.isEmpty { result.append(argument) }
         }
         return result
     }
 
-    /// The interpreter for the script at `path`, from its first line.
-    static func interpreter(ofFileAt path: String) -> [String] {
-        guard let handle = FileHandle(forReadingAtPath: path) else { return defaultInterpreter }
+    /// The interpreter for the script at `path`, from its first line; nil
+    /// when the file cannot be read or its `#!` line is unusable.
+    static func interpreter(ofFileAt path: String) -> [String]? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
         defer { try? handle.close() }
         let head = (try? handle.read(upToCount: 512)) ?? Data()
         let firstLine = String(decoding: head, as: UTF8.self).split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
@@ -89,7 +92,10 @@ enum LidHook {
             Log.error("lid hook skipped: \(probe.script) is not an executable file")
             return
         }
-        let interpreter = interpreter(ofFileAt: probe.script)
+        guard let interpreter = interpreter(ofFileAt: probe.script) else {
+            Log.error("lid hook skipped: \(probe.script) has no usable #! line (an absolute interpreter path without \"=\")")
+            return
+        }
         guard let call = invocation(script: trimmed, closed: closed, sessionActive: sessionActive, interpreter: interpreter) else { return }
         let event = "\(closed ? "closed" : "open") \(sessionActive ? "active" : "idle")"
         do {

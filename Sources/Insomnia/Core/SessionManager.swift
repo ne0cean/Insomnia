@@ -1289,6 +1289,13 @@ final class SessionManager {
         guard let s = session else { return }
         standby = true
         Log.info("standby session until \(iso(s.endsAt))")
+        // The lid may have closed while the start was in flight (unplug, then
+        // close within seconds is the whole point): that close found no
+        // session, or no standby flag yet, so it is honoured here.
+        if clamshell() == true {
+            Log.info("standby: the lid is already closed")
+            await promoteStandby()
+        }
     }
 
     /// The lid closed during standby: the session becomes the auto-start
@@ -1361,7 +1368,12 @@ final class SessionManager {
     func rollPausedDeadline() {
         guard var updated = session, let remaining = pausedRemaining else { return }
         let now = clock()
-        updated.endsAt = now.addingTimeInterval(min(remaining, config.maxDuration))
+        // At least two roll intervals out: the recovery agent judges the
+        // deadline with no grace, so a remaining shorter than one interval
+        // would let it end the session between rolls while the app still
+        // shows it paused.
+        let horizon = max(remaining, 2 * Self.pauseRollInterval)
+        updated.endsAt = now.addingTimeInterval(min(horizon, config.maxDuration))
         do {
             try store.saveSession(updated)
         } catch {
@@ -1432,6 +1444,14 @@ final class SessionManager {
         session = updated
         lastError = nil
         Log.info("session extended by \(Int(extra))s until \(iso(updated.endsAt))")
+        if let frozen = pausedRemaining {
+            // Paused: the extension goes into the frozen remaining, which the
+            // next roll and the resume write out; otherwise they would
+            // overwrite it.
+            pausedRemaining = frozen + updated.endsAt.timeIntervalSince(current.endsAt)
+            rollPausedDeadline()
+            return
+        }
         await armDeadline(updated.endsAt)
     }
 

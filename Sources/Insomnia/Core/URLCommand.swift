@@ -75,8 +75,15 @@ enum URLCommand: Equatable, Sendable {
         }
     }
 
+    /// The longest duration a URL may ask for. Anything past it is refused
+    /// rather than clamped: `Int(…)` of a huge Double traps, and a URL any
+    /// page can open must not be able to crash the app.
+    static let maxDuration: TimeInterval = 365 * 24 * 3600
+
     private static func positive(_ text: String?, unit: TimeInterval) -> DurationQuery {
         guard let text, let number = Double(text), number.isFinite, number > 0 else { return .invalid }
-        return .value(number * unit)
+        let seconds = number * unit
+        guard seconds.isFinite, seconds <= maxDuration else { return .invalid }
+        return .value(seconds)
     }
 }
