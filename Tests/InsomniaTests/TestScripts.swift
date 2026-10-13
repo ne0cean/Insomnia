@@ -27,11 +27,43 @@ enum TestScripts {
         _ text: String, to url: URL, executable: Bool = true,
         file: StaticString = #fileID, line: UInt = #line
     ) throws {
+        if let problem = shebangProblem(text) {
+            throw ShebangError(where: "\(file):\(line)", problem: problem)
+        }
         try text.write(to: url, atomically: true, encoding: .utf8)
         if executable {
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
         }
         try dump(text, name: url.lastPathComponent, source: "\(file):\(line)")
+    }
+
+    struct ShebangError: Error, CustomStringConvertible {
+        let `where`: String
+        let problem: String
+        var description: String { "\(`where`): \(problem)" }
+    }
+
+    /// Shells ShellCheck reads, by interpreter name. CI lints every script
+    /// a test writes, and a zsh or relative shebang failed that job twice
+    /// (SC1071, SC2239) after the tests themselves had passed; this makes
+    /// the same mistake fail locally, in the test that wrote it.
+    static let lintableShells: Set<String> = ["bash", "sh", "dash", "ksh"]
+
+    /// Why ShellCheck could not lint `text`, or nil. A script with no `#!`
+    /// line is linted as bash and is fine. The interpreter must be an
+    /// absolute path whose name (or, through /usr/bin/env, whose argument)
+    /// is one of `lintableShells`.
+    static func shebangProblem(_ text: String) -> String? {
+        guard text.hasPrefix("#!") else { return nil }
+        let line = String(text.prefix { $0 != "\n" }.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+        let parts = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard let program = parts.first else { return "empty #! line" }
+        guard program.hasPrefix("/") else { return "#!\(line): not an absolute path (ShellCheck SC2239)" }
+        let name = program == "/usr/bin/env" && parts.count > 1 ? parts[1] : (program as NSString).lastPathComponent
+        guard lintableShells.contains(name) else {
+            return "#!\(line): ShellCheck cannot lint \(name) (SC1071); use bash, sh, dash or ksh"
+        }
+        return nil
     }
 
     private static let lock = NSLock()
