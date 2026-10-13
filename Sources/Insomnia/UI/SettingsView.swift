@@ -488,6 +488,15 @@ struct SettingsView: View {
             Text("Only when no session is running. The lid-close actions above start with the next close inside that session, not the one that started it.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Toggle("Hold sleep before the lid closes (standby)", isOn: bind(\.standbyBeforeLidClose))
+                .disabled(!manager.config.autoStartOnLidClose)
+            Stepper(value: standbyMinutes, in: standbyMinutesRange, step: 5) {
+                LabeledContent("Standby duration", value: "\(standbyMinutes.wrappedValue) min")
+            }
+            .disabled(!manager.config.autoStartOnLidClose || !manager.config.standbyBeforeLidClose)
+            Text("Without a dock the Mac sleeps 1-3 s after the lid closes, before a session can start. Standby starts one early, when the charger is unplugged or the hotspot comes into range on battery, and the lid close extends it to the auto-start duration. If the lid stays open it ends quietly when the standby duration is up.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             TextField("Script to run on lid close/open (path)", text: bind(\.lidHookScript))
             if let problem = lidHookProblem {
                 Text(problem).font(.caption).foregroundStyle(.orange)
@@ -508,6 +517,17 @@ struct SettingsView: View {
         Binding(
             get: { Int((manager.config.effectiveAutoStartDuration / 3600).rounded()) },
             set: { hours in update { $0.autoStartDuration = TimeInterval(hours) * 3600 } }
+        )
+    }
+
+    private var standbyMinutesRange: ClosedRange<Int> {
+        Int(Config.standbyDurationRange.lowerBound / 60)...Int(Config.standbyDurationRange.upperBound / 60)
+    }
+
+    private var standbyMinutes: Binding<Int> {
+        Binding(
+            get: { Int((manager.config.effectiveStandbyDuration / 60).rounded()) },
+            set: { minutes in update { $0.standbyDuration = TimeInterval(minutes) * 60 } }
         )
     }
 

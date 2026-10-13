@@ -80,6 +80,16 @@ struct Config: Codable, Equatable, Sendable {
     /// `effectiveAutoStartDuration`, which keeps a hand-edited value inside
     /// what Settings offers and under `maxDuration`.
     var autoStartDuration: TimeInterval = 10 * 3600
+    /// Hold sleep ahead of the lid close (`StandbyArmer`): when the charger
+    /// is unplugged, or the hotspot comes into range on battery, with no
+    /// session running, a standby session of `standbyDuration` starts and
+    /// the lid close extends it to `autoStartDuration`. Without this the
+    /// close itself is too late without a dock. Off by default; needs
+    /// `autoStartOnLidClose`.
+    var standbyBeforeLidClose: Bool = false
+    /// How long a standby session holds sleep while the lid stays open, in
+    /// seconds. Read through `effectiveStandbyDuration`.
+    var standbyDuration: TimeInterval = 30 * 60
     /// Absolute path of an executable run on every lid close and open
     /// (`LidHook`). Empty turns the hook off.
     var lidHookScript: String = ""
@@ -179,6 +189,8 @@ struct Config: Codable, Equatable, Sendable {
         tmuxNudgePressesEnter = try c.decodeIfPresent(Bool.self, forKey: .tmuxNudgePressesEnter) ?? d.tmuxNudgePressesEnter
         autoStartOnLidClose = try c.decodeIfPresent(Bool.self, forKey: .autoStartOnLidClose) ?? d.autoStartOnLidClose
         autoStartDuration = try c.decodeIfPresent(TimeInterval.self, forKey: .autoStartDuration) ?? d.autoStartDuration
+        standbyBeforeLidClose = try c.decodeIfPresent(Bool.self, forKey: .standbyBeforeLidClose) ?? d.standbyBeforeLidClose
+        standbyDuration = try c.decodeIfPresent(TimeInterval.self, forKey: .standbyDuration) ?? d.standbyDuration
         lidHookScript = try c.decodeIfPresent(String.self, forKey: .lidHookScript) ?? d.lidHookScript
         launchAtLogin = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? d.launchAtLogin
         launchAtLoginInstall = try c.decodeIfPresent(String.self, forKey: .launchAtLoginInstall)
@@ -249,6 +261,18 @@ extension Config {
         let range = Config.autoStartDurationRange
         let inRange = min(max(autoStartDuration, range.lowerBound), range.upperBound)
         return min(inRange, maxDuration)
+    }
+
+    /// What the Settings stepper offers for `standbyDuration`.
+    static let standbyDurationRange: ClosedRange<TimeInterval> = (5 * 60)...(2 * 3600)
+
+    /// `standbyDuration` clamped to `standbyDurationRange`, to
+    /// `effectiveAutoStartDuration` (a standby longer than the session it
+    /// becomes would shrink on the lid close) and to `maxDuration`.
+    var effectiveStandbyDuration: TimeInterval {
+        let range = Config.standbyDurationRange
+        let inRange = min(max(standbyDuration, range.lowerBound), range.upperBound)
+        return min(inRange, effectiveAutoStartDuration, maxDuration)
     }
 }
 

@@ -42,6 +42,30 @@ final class LidHookConfigTests: XCTestCase {
         c.maxDuration = 2 * 3600
         XCTAssertEqual(c.effectiveAutoStartDuration, 2 * 3600)
     }
+
+    func testStandbyDefaultsDecodeAndClamp() throws {
+        let c = Config()
+        XCTAssertFalse(c.standbyBeforeLidClose, "standby is opt in")
+        XCTAssertEqual(c.standbyDuration, 30 * 60)
+        XCTAssertEqual(c.effectiveStandbyDuration, 30 * 60)
+
+        let old = try Store.makeDecoder().decode(Config.self, from: Data(#"{"autoStartOnLidClose": true}"#.utf8))
+        XCTAssertFalse(old.standbyBeforeLidClose)
+        XCTAssertEqual(old.standbyDuration, 30 * 60)
+
+        let json = #"{"standbyBeforeLidClose": true, "standbyDuration": 600}"#
+        var on = try Store.makeDecoder().decode(Config.self, from: Data(json.utf8))
+        XCTAssertTrue(on.standbyBeforeLidClose)
+        XCTAssertEqual(on.standbyDuration, 600)
+        XCTAssertEqual(try Store.makeDecoder().decode(Config.self, from: Store.makeEncoder().encode(on)), on)
+
+        on.standbyDuration = 10
+        XCTAssertEqual(on.effectiveStandbyDuration, 5 * 60, "floor")
+        on.standbyDuration = 9 * 3600
+        XCTAssertEqual(on.effectiveStandbyDuration, 2 * 3600, "ceiling")
+        on.autoStartDuration = 3600
+        XCTAssertEqual(on.effectiveStandbyDuration, 3600, "never longer than the session it becomes")
+    }
 }
 
 final class LidHookTests: XCTestCase {
@@ -60,10 +84,23 @@ final class LidHookTests: XCTestCase {
         let close = try XCTUnwrap(LidHook.invocation(script: "/opt/hook.sh", closed: true, sessionActive: false))
         XCTAssertEqual(close.executable, "/usr/bin/env")
         XCTAssertEqual(close.script, "/opt/hook.sh")
-        XCTAssertEqual(close.arguments, ["INSOMNIA_LID=closed", "INSOMNIA_SESSION=idle", "/opt/hook.sh", "closed", "idle"])
+        XCTAssertEqual(close.arguments, ["INSOMNIA_LID=closed", "INSOMNIA_SESSION=idle", "/bin/sh", "/opt/hook.sh", "closed", "idle"])
 
-        let open = try XCTUnwrap(LidHook.invocation(script: " /opt/hook.sh ", closed: false, sessionActive: true))
-        XCTAssertEqual(open.arguments, ["INSOMNIA_LID=open", "INSOMNIA_SESSION=active", "/opt/hook.sh", "open", "active"])
+        let open = try XCTUnwrap(LidHook.invocation(script: " /opt/hook.sh ", closed: false, sessionActive: true, interpreter: ["/bin/bash", "-e"]))
+        XCTAssertEqual(open.arguments, ["INSOMNIA_LID=open", "INSOMNIA_SESSION=active", "/bin/bash", "-e", "/opt/hook.sh", "open", "active"])
+    }
+
+    /// The `#!` line names the interpreter as the kernel would run it; the
+    /// script is never exec'd itself, so Gatekeeper does not assess it.
+    func testShebangNamesTheInterpreter() {
+        XCTAssertEqual(LidHook.interpreter(of: "#!/bin/bash"), ["/bin/bash"])
+        XCTAssertEqual(LidHook.interpreter(of: "#! /bin/zsh -f"), ["/bin/zsh", "-f"])
+        XCTAssertEqual(LidHook.interpreter(of: "#!/usr/bin/env python3"), ["/usr/bin/env", "python3"])
+        XCTAssertEqual(LidHook.interpreter(of: "#!/usr/bin/env -S python3 -u"), ["/usr/bin/env", "-S python3 -u"], "the rest of the line is one argument")
+        XCTAssertEqual(LidHook.interpreter(of: "echo hi"), ["/bin/sh"], "no shebang")
+        XCTAssertEqual(LidHook.interpreter(of: ""), ["/bin/sh"])
+        XCTAssertEqual(LidHook.interpreter(of: "#!bash"), ["/bin/sh"], "a relative interpreter is not run")
+        XCTAssertEqual(LidHook.interpreter(of: "#!/bin/sh A=1"), ["/bin/sh"], "an argument env would read as a variable is dropped")
     }
 
     func testTildeIsExpanded() throws {
@@ -86,6 +123,31 @@ final class LidHookTests: XCTestCase {
 
         await LidHook.run(script: script.path, closed: true, sessionActive: false)
         XCTAssertEqual(try String(contentsOf: out, encoding: .utf8), "closed idle closed idle\n")
+    }
+
+    /// A script whose shebang is not bash runs under that interpreter, and
+    /// one without a shebang under /bin/sh.
+    func testRunUsesTheScriptsOwnInterpreter() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lidhook-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = dir.appendingPathComponent("out.txt")
+        let zsh = dir.appendingPathComponent("hook.zsh")
+        try TestScripts.write("""
+        #!/bin/zsh
+        print -r -- "$ZSH_VERSION $1" > "\(out.path)"
+        """, to: zsh)
+        await LidHook.run(script: zsh.path, closed: false, sessionActive: false)
+        let zshLine = try String(contentsOf: out, encoding: .utf8)
+        XCTAssertTrue(zshLine.hasSuffix(" open\n"), zshLine)
+        XCTAssertGreaterThan(zshLine.count, " open\n".count, "ZSH_VERSION was empty: not run by zsh")
+
+        let bare = dir.appendingPathComponent("bare.sh")
+        try TestScripts.write("""
+        printf '%s' "$INSOMNIA_SESSION" > "\(out.path)"
+        """, to: bare)
+        await LidHook.run(script: bare.path, closed: true, sessionActive: true)
+        XCTAssertEqual(try String(contentsOf: out, encoding: .utf8), "active")
     }
 
     /// A file that is not executable is skipped, not run through a shell.

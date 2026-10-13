@@ -27,6 +27,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: SettingsWindow?
     /// Lid events between sessions: the lid hook and auto-start on lid close.
     private var idleLid: IdleLidWatcher?
+    /// Sleep held ahead of the lid close (`Config.standbyBeforeLidClose`).
+    private var standby: StandbyArmer?
     private var terminating = false
 
     override init() {
@@ -90,6 +92,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let watcher = IdleLidWatcher(manager: manager)
         watcher.start()
         idleLid = watcher
+        let armer = StandbyArmer(manager: manager)
+        armer.start()
+        standby = armer
     }
 
     /// `insomnia://` URLs (`URLCommand`). Launch Services starts the app

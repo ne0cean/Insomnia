@@ -19,6 +19,10 @@ enum EndReason: String, Sendable {
     /// may still have been applied, so the start is undone from the journal
     /// like an end rather than rolled back from memory.
     case startFailed
+    /// A standby session (`StandbyArmer`) reached its deadline with the lid
+    /// still open: sleep was held for nothing, which is the expected case
+    /// of a charger unplugged at the desk. Logged, not announced.
+    case standbyExpired
 }
 
 /// What `end` achieved. Callers that are about to quit need to know whether
@@ -1268,6 +1272,40 @@ final class SessionManager {
         // PR3: schedule "5 minutes left" notification.
     }
 
+    /// A standby session: started by `StandbyArmer` ahead of the lid close,
+    /// extended to the auto-start duration by the close
+    /// (`promoteStandby`), ended quietly by its own deadline otherwise.
+    /// Cleared by every end. Not persisted: after a relaunch it is an
+    /// ordinary short session.
+    @ObservationIgnored private(set) var standby = false
+
+    /// `start`, and mark the session as standby if it started.
+    func startStandby(duration: TimeInterval) async {
+        guard session == nil else {
+            Log.info("standby ignored: session already active")
+            return
+        }
+        await start(duration: duration)
+        guard let s = session else { return }
+        standby = true
+        Log.info("standby session until \(iso(s.endsAt))")
+    }
+
+    /// The lid closed during standby: the session becomes the auto-start
+    /// session, extended so it ends `config.effectiveAutoStartDuration`
+    /// from now. Nothing to do when the session is not a standby one.
+    func promoteStandby() async {
+        guard standby, let s = session else { return }
+        standby = false
+        let extra = config.effectiveAutoStartDuration - s.remaining(at: clock())
+        guard extra > 0 else {
+            Log.info("lid closed during standby: session already runs past the auto-start duration")
+            return
+        }
+        Log.info("lid closed during standby: extending the session by \(Int(extra)) s to the auto-start duration")
+        await extend(by: extra)
+    }
+
     func extend(by extra: TimeInterval) async {
         guard session != nil else { return }
         let ticket = endTicket
@@ -1357,6 +1395,7 @@ final class SessionManager {
         stopTimers()
         countdownPaused = false
         session = nil
+        standby = false
         // Every lid action is undone from the journal below, or by the
         // retry of this end, and Low Power Mode restored from it: a lid
         // event refused earlier, a settle pass waiting to run again and
@@ -1483,7 +1522,11 @@ final class SessionManager {
             if !agentCanFinish { scheduleEndRetry(reason) }
             return .incomplete(agentArmed: agentCanFinish)
         }
-        notifier.post(title: Self.endTitle(reason, had: had), body: endBody(reason, waiting: waiting))
+        // A standby that expired at the desk is the quiet case; it is still
+        // announced when an output device waits for its volume.
+        if reason != .standbyExpired || !waiting.isEmpty {
+            notifier.post(title: Self.endTitle(reason, had: had), body: endBody(reason, waiting: waiting))
+        }
         return .restored
     }
 
@@ -2923,7 +2966,7 @@ final class SessionManager {
         let timer = Timer(fire: endsAt, interval: 0, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 guard let self, let s = self.session, s.isExpired(at: self.clock()) else { return }
-                await self.end(reason: .timer)
+                await self.end(reason: self.standby ? .standbyExpired : .timer)
             }
         }
         timer.tolerance = 1
@@ -3185,6 +3228,7 @@ final class SessionManager {
             : "A previous session left changes behind; everything has been undone."
         case .recoveryUnavailable: "Insomnia could not arm its recovery agent for the session found on disk, so it ended the session. Sleep is back to normal."
         case .startFailed: "Insomnia could not disable sleep, so no session was started. Sleep is back to normal."
+        case .standbyExpired: "The lid stayed open for the whole standby. Sleep is back to normal."
         }
     }
 }

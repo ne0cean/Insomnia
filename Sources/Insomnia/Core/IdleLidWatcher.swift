@@ -8,10 +8,16 @@ import Foundation
 ///
 /// Events while a session is active are left to `LidActions`, which runs
 /// the hook with `active` after its own actions, so each event runs the
-/// hook once. A session this watcher starts begins with the lid already
-/// closed: AppServices' observer starts then and sees no change, so the
-/// lid-close actions (mute, darken, freeze) do not run for that close.
-/// They run on the next close inside the session.
+/// hook once. The one exception is a close during a standby session
+/// (`StandbyArmer`): sleep is already held, so the close only extends that
+/// session to the auto-start duration (`SessionManager.promoteStandby`).
+///
+/// A session this watcher starts begins with the lid already closed:
+/// AppServices' observer starts then and sees no change, so the lid-close
+/// actions (mute, darken, freeze) do not run for that close. They run on
+/// the next close inside the session. A start after the close is a
+/// fallback that works only on a dock (sleep is committed within seconds
+/// otherwise); standby is the path that works without one.
 @MainActor
 final class IdleLidWatcher {
     private weak var manager: SessionManager?
@@ -39,7 +45,12 @@ final class IdleLidWatcher {
 
     /// Internal so a test can deliver an event.
     func lidChanged(_ closed: Bool) {
-        guard let manager, !manager.isActive else { return }
+        guard let manager else { return }
+        if manager.isActive {
+            guard closed, manager.standby else { return }
+            Task { @MainActor in await manager.promoteStandby() }
+            return
+        }
         let config = manager.config
         let script = config.lidHookScript
         if !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

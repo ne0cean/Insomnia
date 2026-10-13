@@ -38,6 +38,46 @@ final class IdleLidWatcherTests: XCTestCase {
         _ = await m.end(reason: .user)
     }
 
+    /// A close during a standby session extends it to the auto-start
+    /// duration instead of starting (or ignoring) anything.
+    func testCloseDuringStandbyPromotesTheSession() async {
+        let m = h.makeManager()
+        m.config.autoStartOnLidClose = true
+        m.config.autoStartDuration = 8 * 3600
+        m.config.standbyBeforeLidClose = true
+        await m.startStandby(duration: 30 * 60)
+        XCTAssertTrue(m.isActive)
+        XCTAssertTrue(m.standby)
+        let watcher = IdleLidWatcher(manager: m, lid: LidObserver(read: { true }, debounce: 0.05))
+
+        watcher.lidChanged(true)
+        await waitUntil("the standby session was not promoted") { !m.standby }
+        await waitUntil("the session was not extended") {
+            m.session.map { $0.endsAt.timeIntervalSince(h.clock.now) } == 8 * 3600
+        }
+        XCTAssertEqual(m.session?.extensions.count, 1)
+
+        // A later close inside the same session is left to the lid actions.
+        watcher.lidChanged(true)
+        try? await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(m.session?.extensions.count, 1)
+        _ = await m.end(reason: .user)
+        XCTAssertFalse(m.standby)
+    }
+
+    /// An ordinary session is not touched by the watcher.
+    func testCloseDuringAnOrdinarySessionIsLeftToTheLidActions() async throws {
+        let m = h.makeManager()
+        m.config.autoStartOnLidClose = true
+        await m.start(duration: 3600)
+        XCTAssertFalse(m.standby)
+        let watcher = IdleLidWatcher(manager: m, lid: LidObserver(read: { true }, debounce: 0.05))
+        watcher.lidChanged(true)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(m.session?.extensions, [])
+        _ = await m.end(reason: .user)
+    }
+
     func testCloseWithTheSettingOffStartsNothing() async throws {
         let m = h.makeManager()
         let watcher = IdleLidWatcher(manager: m, lid: LidObserver(read: { true }, debounce: 0.05))
