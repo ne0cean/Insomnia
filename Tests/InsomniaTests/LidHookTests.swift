@@ -125,22 +125,25 @@ final class LidHookTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: out, encoding: .utf8), "closed idle closed idle\n")
     }
 
-    /// A script whose shebang is not bash runs under that interpreter, and
-    /// one without a shebang under /bin/sh.
-    func testRunUsesTheScriptsOwnInterpreter() async throws {
+    /// The shebang's interpreter and its argument are what runs the script:
+    /// `#!/bin/bash -e` stops at the first failing command, so the line
+    /// after it never runs. A script without a shebang runs under /bin/sh.
+    func testRunUsesTheScriptsOwnInterpreterAndArgument() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lidhook-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let out = dir.appendingPathComponent("out.txt")
-        let zsh = dir.appendingPathComponent("hook.zsh")
+        let strict = dir.appendingPathComponent("strict.sh")
         try TestScripts.write("""
-        #!/bin/zsh
-        print -r -- "$ZSH_VERSION $1" > "\(out.path)"
-        """, to: zsh)
-        await LidHook.run(script: zsh.path, closed: false, sessionActive: false)
-        let zshLine = try String(contentsOf: out, encoding: .utf8)
-        XCTAssertTrue(zshLine.hasSuffix(" open\n"), zshLine)
-        XCTAssertGreaterThan(zshLine.count, " open\n".count, "ZSH_VERSION was empty: not run by zsh")
+        #!/bin/bash -e
+        printf '%s' "$BASH_VERSION" > "\(out.path)"
+        false
+        printf 'ran past the failure' > "\(out.path)"
+        """, to: strict)
+        await LidHook.run(script: strict.path, closed: false, sessionActive: false)
+        let written = try String(contentsOf: out, encoding: .utf8)
+        XCTAssertFalse(written.isEmpty, "BASH_VERSION was empty: not run by bash")
+        XCTAssertNotEqual(written, "ran past the failure", "-e from the shebang was not passed to bash")
 
         let bare = dir.appendingPathComponent("bare.sh")
         try TestScripts.write("""
