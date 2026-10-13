@@ -112,8 +112,11 @@ final class LidHookTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
         let out = dir.appendingPathComponent("out.txt")
         let script = dir.appendingPathComponent("hook.sh")
+        // A program path env would read as a variable assignment. (ShellCheck,
+        // which CI runs over every script a test writes, reads the basename
+        // and is content; `#!bash` would be an unrecognised shebang to it.)
         try TestScripts.write("""
-        #!bash
+        #!/bin/A=B/sh
         touch "\(out.path)"
         """, to: script)
         await LidHook.run(script: script.path, closed: true, sessionActive: false)
