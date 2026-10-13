@@ -2676,6 +2676,29 @@ final class SessionManager {
         reconcileRetry?.cancel()
         reconcileRetry = nil
         await reconcile(ticket: endTicket, isRetry: false)
+        launchReconciled = true
+    }
+
+    /// The live app sets this before it reconciles: a command from a script
+    /// must not be judged against the empty session a fresh launch starts
+    /// with, before the session on disk (after a crash or force quit) has
+    /// been loaded — `insomnia-ctl end` that launches the app would read
+    /// "no session" and leave sleep held until the deadline (review R2-N1).
+    /// Off in tests, which build managers without a launch reconcile.
+    @ObservationIgnored var commandsWaitForLaunchReconcile = false
+    @ObservationIgnored private(set) var launchReconciled = false
+    static let launchReconcileWait: Duration = .seconds(30)
+
+    /// Returns once the launch reconcile has run (or at once when commands
+    /// do not wait for it). Bounded: a reconcile that never finishes does
+    /// not hold scripts forever; the command is then judged as things stand.
+    func waitForLaunchReconcile() async {
+        guard commandsWaitForLaunchReconcile else { return }
+        let deadline = ContinuousClock.now.advanced(by: Self.launchReconcileWait)
+        while !launchReconciled, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        if !launchReconciled { Log.error("url scheme: launch reconcile still running after \(Self.launchReconcileWait); judging the command as things stand") }
     }
 
     private func reconcile(ticket: Int, isRetry: Bool) async {

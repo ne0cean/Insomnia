@@ -33,6 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     override init() {
         let manager = SessionManager.live()
+        // URL commands (scripts) wait for the launch reconcile below.
+        manager.commandsWaitForLaunchReconcile = true
         self.manager = manager
         secrets = KeychainHotspotSecretStore(keychain: KeychainStore()) {
             manager.config.hotspotSSID

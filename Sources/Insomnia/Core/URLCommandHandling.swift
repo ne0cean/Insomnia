@@ -7,6 +7,9 @@ import Foundation
 /// script must never be dropped on a stale read).
 extension SessionManager {
     func perform(_ command: URLCommand) async {
+        // Every decision below reads the session; on a fresh launch that is
+        // only true once the session on disk has been reconciled.
+        await waitForLaunchReconcile()
         switch command {
         case let .start(seconds):
             let duration = seconds ?? config.defaultPreset

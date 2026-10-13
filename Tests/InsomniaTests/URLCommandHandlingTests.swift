@@ -101,6 +101,25 @@ final class URLCommandHandlingTests: XCTestCase {
         _ = await m.end(reason: .user)
     }
 
+    /// After a crash, `insomnia-ctl end` launches the app: the end must wait
+    /// for the launch reconcile to load the session on disk, not be dropped
+    /// as "no session" while sleep stays held (review R2-N1).
+    func testEndOnAFreshLaunchWaitsForTheReconcile() async {
+        let before = h.makeManager()
+        await before.start(duration: 3600)
+        XCTAssertTrue(before.isActive)
+        // The app dies; a new one comes up on the same disk state.
+        let relaunched = h.makeManager()
+        relaunched.commandsWaitForLaunchReconcile = true
+        XCTAssertFalse(relaunched.isActive, "nothing loaded yet")
+        let ending = Task { await relaunched.perform(.end) }
+        await Task.yield()
+        await relaunched.reconcile()
+        await ending.value
+        XCTAssertFalse(relaunched.isActive, "the end applied to the session the reconcile loaded")
+        XCTAssertNil(try? relaunched.store.loadSession())
+    }
+
     func testEndWithNothingToEndIsANoOp() async {
         let m = h.makeManager()
         let before = h.notifier.posts.count
