@@ -27,6 +27,33 @@ final class URLCommandHandlingTests: XCTestCase {
         _ = await m.end(reason: .user)
     }
 
+    /// The unplug's standby start is still in flight when `start 8h`
+    /// arrives: the explicit start must become that standby, not be
+    /// ignored as "session already active" (review r3).
+    func testStartDuringAStandbyStartInFlightPromotesIt() async {
+        let m = h.makeManager()
+        m.config.autoStartOnLidClose = true
+        m.config.standbyBeforeLidClose = true
+        let standby = Task { await m.startStandby(duration: 1800) }
+        let explicit = Task { await m.perform(.start(8 * 3600)) }
+        await standby.value
+        await explicit.value
+        XCTAssertTrue(m.isActive)
+        XCTAssertFalse(m.standby, "the explicit start took the standby over")
+        XCTAssertEqual(m.session.map { $0.endsAt.timeIntervalSince(h.clock.now) }, 8 * 3600)
+        _ = await m.end(reason: .user)
+    }
+
+    /// The standby flag is set in the same step as the session: there is
+    /// no moment where the session exists and reads as an ordinary one.
+    func testStandbyFlagIsSetWithTheSession() async {
+        let m = h.makeManager()
+        await m.start(duration: 1800, asStandby: true)
+        XCTAssertTrue(m.isActive)
+        XCTAssertTrue(m.standby)
+        _ = await m.end(reason: .user)
+    }
+
     /// A start over an ordinary session is still ignored (use extend).
     func testStartOverAnOrdinarySessionIsIgnored() async {
         let m = h.makeManager()

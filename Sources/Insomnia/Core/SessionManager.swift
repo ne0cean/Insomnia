@@ -1170,7 +1170,7 @@ final class SessionManager {
     /// setting may have been applied before the error or timeout), so it is
     /// undone from the journal like an end, and the journal keeps the entry
     /// until that undo is confirmed.
-    func start(duration: TimeInterval) async {
+    func start(duration: TimeInterval, asStandby: Bool = false) async {
         guard !quitRequested else {
             Log.info("start ignored: quit requested")
             return
@@ -1182,13 +1182,13 @@ final class SessionManager {
         let ticket = endTicket
         startsInFlight += 1
         defer { startsInFlight -= 1 }
-        _ = await exclusive("start") { await self.performStart(duration: duration, ticket: ticket) }
+        _ = await exclusive("start") { await self.performStart(duration: duration, ticket: ticket, asStandby: asStandby) }
         // A start that goes through before a refused launch reconcile runs
         // again drops that reconcile, and takes over its check.
         await settleEarlierCommand()
     }
 
-    private func performStart(duration: TimeInterval, ticket: Int) async {
+    private func performStart(duration: TimeInterval, ticket: Int, asStandby: Bool = false) async {
         guard session == nil else {
             Log.info("start ignored: session already active")
             return
@@ -1263,6 +1263,10 @@ final class SessionManager {
         }
 
         session = new
+        // Set in the same step as the session, so no command sees a standby
+        // session without its flag (a start or extend arriving in between
+        // was dropped or overwritten — review r3).
+        standby = asStandby
         lastError = nil
         countdownPaused = clamshell() == true
         foreignSleepWarning = nil
@@ -1291,9 +1295,8 @@ final class SessionManager {
             Log.info("standby ignored: session already active")
             return
         }
-        await start(duration: duration)
-        guard let s = session else { return }
-        standby = true
+        await start(duration: duration, asStandby: true)
+        guard standby, let s = session else { return }
         Log.info("standby session until \(iso(s.endsAt))")
         // The lid may have closed while the start was in flight (unplug, then
         // close within seconds is the whole point): that close found no
