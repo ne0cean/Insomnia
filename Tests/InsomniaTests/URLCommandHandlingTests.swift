@@ -54,9 +54,11 @@ final class URLCommandHandlingTests: XCTestCase {
     func testResumeRightAfterPauseIsKept() async {
         let m = h.makeManager()
         await m.start(duration: 3600)
+        // As the app does it: one task per URL, created in arrival order.
         let pausing = Task { await m.perform(.pause) }
-        await m.perform(.resume)
+        let resuming = Task { await m.perform(.resume) }
         await pausing.value
+        await resuming.value
         XCTAssertFalse(m.isPaused, "the resume ran after the pause, not dropped before it")
         _ = await m.end(reason: .user)
     }
