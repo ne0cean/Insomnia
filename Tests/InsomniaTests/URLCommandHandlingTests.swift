@@ -140,6 +140,74 @@ final class URLCommandHandlingTests: XCTestCase {
         XCTAssertNil(try? relaunched.store.loadSession())
     }
 
+    /// R4-M1: launch reconcile refused (an orphaned pmset holds the lock),
+    /// the gate opens anyway, the lock frees, `extend 2h` runs: it must
+    /// reconcile first and extend the session on disk, not be lost.
+    func testExtendAfterARefusedLaunchReconcileIsKept() async throws {
+        let crashed = h.makeManager()
+        await crashed.start(duration: 3600)
+        let other = try XCTUnwrap(try RecoveryLock(url: h.home.paths.recoveryLock).tryAcquire())
+        let b = h.makeManager(retryDelay: 0.5)
+        b.holdCommandsForLaunch()
+        let extend = b.enqueue(.extend(2 * 3600))
+        await b.reconcile()
+        b.openCommands()
+        other.release()
+        await extend.value
+        try await Task.sleep(for: .seconds(1.5))
+        XCTAssertTrue(b.isActive)
+        XCTAssertEqual(b.session.map { $0.endsAt.timeIntervalSince(h.clock.now) }, 3 * 3600, "the extend applied to the session on disk")
+        _ = await b.end(reason: .user)
+    }
+
+    /// R4-M1, pause: the session comes back paused, not running.
+    func testPauseAfterARefusedLaunchReconcileIsKept() async throws {
+        let crashed = h.makeManager()
+        await crashed.start(duration: 3600)
+        let other = try XCTUnwrap(try RecoveryLock(url: h.home.paths.recoveryLock).tryAcquire())
+        let b = h.makeManager(retryDelay: 0.5)
+        b.holdCommandsForLaunch()
+        let pause = b.enqueue(.pause)
+        await b.reconcile()
+        b.openCommands()
+        other.release()
+        await pause.value
+        try await Task.sleep(for: .seconds(1.5))
+        XCTAssertTrue(b.isActive)
+        XCTAssertTrue(b.isPaused)
+        _ = await b.end(reason: .user)
+    }
+
+    /// While the lock is still held, the command is refused with a visible
+    /// error instead of being applied to the empty state.
+    func testCommandIsRefusedVisiblyWhileTheDiskSessionCannotLoad() async throws {
+        let crashed = h.makeManager()
+        await crashed.start(duration: 3600)
+        let other = try XCTUnwrap(try RecoveryLock(url: h.home.paths.recoveryLock).tryAcquire())
+        let b = h.makeManager()
+        await b.perform(.pause)
+        XCTAssertFalse(b.isPaused)
+        XCTAssertNotNil(b.lastError, "the refusal is shown, not silent")
+        other.release()
+    }
+
+    /// The launch gate matters: an Apple event before didFinishLaunching
+    /// waits for the reconcile instead of reaching the queue first.
+    func testColdPauseBeforeTheReconcileSeesTheSession() async {
+        let crashed = h.makeManager()
+        await crashed.start(duration: 3600)
+        let b = h.makeManager()
+        b.holdCommandsForLaunch()
+        let pause = b.enqueue(.pause)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertFalse(b.isPaused, "nothing ran while the gate was closed")
+        await b.reconcile()
+        b.openCommands()
+        await pause.value
+        XCTAssertTrue(b.isPaused)
+        _ = await b.end(reason: .user)
+    }
+
     func testEndWithNothingToEndIsANoOp() async {
         let m = h.makeManager()
         let before = h.notifier.posts.count
