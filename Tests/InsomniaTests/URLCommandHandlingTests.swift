@@ -64,30 +64,38 @@ final class URLCommandHandlingTests: XCTestCase {
         _ = await m.end(reason: .user)
     }
 
-    /// An end sent while a start is still in flight ends the session that
-    /// start makes, instead of being dropped as "no session".
-    func testEndDuringAStartInFlightEndsIt() async {
+    /// Commands run in arrival order, each to completion: `start 8h` then
+    /// `end` never lets the end be judged first (review r3 R3-N2).
+    func testQueuedStartThenEndEndsTheSession() async {
         let m = h.makeManager()
-        let starting = Task { await m.perform(.start(3600)) }
-        // Let the start take its place in the queue before the end arrives.
-        for _ in 0..<100 where !(m.startsInFlight > 0 || m.isActive) { await Task.yield() }
-        XCTAssertTrue(m.startsInFlight > 0 || m.isActive, "the start never reached the manager")
-        await m.perform(.end)
-        await starting.value
-        XCTAssertFalse(m.isActive, "the end applied to the session the start made")
+        m.enqueue(.start(8 * 3600))
+        await m.enqueue(.end).value
+        XCTAssertFalse(m.isActive, "the end ran after the start, not before it")
     }
 
-    /// A resume right after a pause still in flight is not dropped.
-    func testResumeRightAfterPauseIsKept() async {
+    /// A resume right after a pause runs after it, not before.
+    func testQueuedPauseThenResumeLeavesItRunning() async {
         let m = h.makeManager()
         await m.start(duration: 3600)
-        // As the app does it: one task per URL, created in arrival order.
-        let pausing = Task { await m.perform(.pause) }
-        let resuming = Task { await m.perform(.resume) }
-        await pausing.value
-        await resuming.value
-        XCTAssertFalse(m.isPaused, "the resume ran after the pause, not dropped before it")
+        m.enqueue(.pause)
+        await m.enqueue(.resume).value
+        XCTAssertFalse(m.isPaused)
         _ = await m.end(reason: .user)
+    }
+
+    /// The live configuration: the queue is closed until the launch
+    /// reconcile has run, and the order holds across the gate.
+    func testCommandsWaitBehindTheLaunchGateInOrder() async {
+        let m = h.makeManager()
+        m.holdCommandsForLaunch()
+        m.enqueue(.start(8 * 3600))
+        let last = m.enqueue(.end)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertFalse(m.isActive, "nothing ran while the gate was closed")
+        XCTAssertEqual(m.startsInFlight, 0)
+        m.openCommands()
+        await last.value
+        XCTAssertFalse(m.isActive, "start then end, in order, after the gate opened")
     }
 
     /// An explicit extend makes a standby a session the user wants kept.
@@ -101,22 +109,34 @@ final class URLCommandHandlingTests: XCTestCase {
         _ = await m.end(reason: .user)
     }
 
-    /// After a crash, `insomnia-ctl end` launches the app: the end must wait
-    /// for the launch reconcile to load the session on disk, not be dropped
-    /// as "no session" while sleep stays held (review R2-N1).
-    func testEndOnAFreshLaunchWaitsForTheReconcile() async {
+    /// After a crash, `insomnia-ctl end` launches the app. Even when the
+    /// launch reconcile has not loaded the session (it was refused, say,
+    /// with the lock still held), the end ends what the disk holds instead
+    /// of being dropped as "no session" (review R2-N1, r3 R3-N1).
+    func testEndWithTheSessionOnlyOnDiskEndsIt() async {
         let before = h.makeManager()
         await before.start(duration: 3600)
-        XCTAssertTrue(before.isActive)
-        // The app dies; a new one comes up on the same disk state.
+        XCTAssertNotNil(try? before.store.loadSession())
+        // The app dies; a new one comes up on the same disk, no reconcile.
         let relaunched = h.makeManager()
-        relaunched.commandsWaitForLaunchReconcile = true
-        XCTAssertFalse(relaunched.isActive, "nothing loaded yet")
-        let ending = Task { await relaunched.perform(.end) }
-        await Task.yield()
+        XCTAssertFalse(relaunched.isActive, "nothing loaded")
+        await relaunched.perform(.end)
+        XCTAssertNil(try? relaunched.store.loadSession(), "the session on disk was ended, not left for a later reconcile to revive")
+        XCTAssertFalse(relaunched.isActive)
+    }
+
+    /// The launch gate opens after the reconcile in the live app; behind it
+    /// an end sees the reconciled session.
+    func testEndBehindTheGateEndsTheReconciledSession() async {
+        let before = h.makeManager()
+        await before.start(duration: 3600)
+        let relaunched = h.makeManager()
+        relaunched.holdCommandsForLaunch()
+        let ending = relaunched.enqueue(.end)
         await relaunched.reconcile()
+        relaunched.openCommands()
         await ending.value
-        XCTAssertFalse(relaunched.isActive, "the end applied to the session the reconcile loaded")
+        XCTAssertFalse(relaunched.isActive)
         XCTAssertNil(try? relaunched.store.loadSession())
     }
 

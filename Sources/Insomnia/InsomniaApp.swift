@@ -33,8 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     override init() {
         let manager = SessionManager.live()
-        // URL commands (scripts) wait for the launch reconcile below.
-        manager.commandsWaitForLaunchReconcile = true
+        // URL commands (scripts) queue behind the launch reconcile below.
+        manager.holdCommandsForLaunch()
         self.manager = manager
         secrets = KeychainHotspotSecretStore(keychain: KeychainStore()) {
             manager.config.hotspotSSID
@@ -90,7 +90,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = StatusItemController(manager: manager, status: status) { [weak settings] in
             settings?.show()
         }
-        Task { await manager.reconcile() }
+        Task {
+            await manager.reconcile()
+            manager.openCommands()
+        }
         let watcher = IdleLidWatcher(manager: manager)
         watcher.start()
         idleLid = watcher
@@ -116,7 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (`SessionManager.perform`); nothing is pre-checked here against a
     /// session state a queued command is about to change.
     private func handle(_ command: URLCommand) {
-        Task { await manager.perform(command) }
+        manager.enqueue(command)
     }
 
     /// Quitting always ends the session (spec 1). Terminate is deferred until
