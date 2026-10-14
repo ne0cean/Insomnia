@@ -654,7 +654,8 @@ final class StatusItemController: NSObject {
             settings: #selector(menuOpenSettings),
             quit: #selector(menuQuit),
             relaunchBrowser: #selector(menuRelaunchBrowser(_:)),
-            stopWaitingForOutput: #selector(menuStopWaitingForOutput(_:))
+            stopWaitingForOutput: #selector(menuStopWaitingForOutput(_:)),
+            togglePause: #selector(menuTogglePause)
         )
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
     }
@@ -665,6 +666,7 @@ final class StatusItemController: NSObject {
         StatusMenu.items(
             sessionActive: manager.isActive,
             sleepHeld: manager.state.sleepDisabledByUs,
+            paused: manager.isActive ? manager.isPaused : nil,
             machine: StatusLines.machine(
                 lidClosed: status.lidClosed,
                 watts: status.instantWatts(),
@@ -724,6 +726,12 @@ final class StatusItemController: NSObject {
         // forward so the alert is not behind whatever is frontmost.
         NSApp.activate(ignoringOtherApps: true)
         return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    @objc private func menuTogglePause() {
+        Task {
+            if manager.isPaused { await manager.resume() } else { await manager.pause() }
+        }
     }
 
     @objc private func menuQuit() {

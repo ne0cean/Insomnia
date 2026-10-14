@@ -26,6 +26,7 @@ struct SettingsView: View {
         Form {
             sessionSection
             lidSection
+            lidHookSection
             agentSection
             powerSection
             networkSection
@@ -306,7 +307,7 @@ struct SettingsView: View {
                     .disabled(newTmuxTarget.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         } header: {
-            Text("Network failover")
+            Text("Network failover (iPhone or Android hotspot)")
         } footer: {
             Text("The password is kept in the login keychain, readable without a prompt only by the build of Insomnia that saved it; after a reinstall, enter it again. Location permission lets macOS reveal Wi-Fi network names and find the configured hotspot.")
         }
@@ -473,6 +474,74 @@ struct SettingsView: View {
         guard !t.isEmpty else { return }
         update { if !$0.tmuxTargets.contains(t) { $0.tmuxTargets.append(t) } }
         newTmuxTarget = ""
+    }
+
+    /// Auto-start and the lid hook, which also act between sessions
+    /// (`IdleLidWatcher`), unlike the lid-close actions above.
+    private var lidHookSection: some View {
+        Section {
+            Toggle("Start a session when the lid closes", isOn: bind(\.autoStartOnLidClose))
+            Stepper(value: autoStartHours, in: autoStartHoursRange, step: 1) {
+                LabeledContent("Auto-start duration", value: "\(autoStartHours.wrappedValue) h")
+            }
+            .disabled(!manager.config.autoStartOnLidClose)
+            Text("Only when no session is running. The lid-close actions above start with the next close inside that session, not the one that started it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Toggle("Hold sleep before the lid closes (standby)", isOn: bind(\.standbyBeforeLidClose))
+                .disabled(!manager.config.autoStartOnLidClose)
+            Stepper(value: standbyMinutes, in: standbyMinutesRange, step: 5) {
+                LabeledContent("Standby duration", value: "\(standbyMinutes.wrappedValue) min")
+            }
+            .disabled(!manager.config.autoStartOnLidClose || !manager.config.standbyBeforeLidClose)
+            Text("Without a dock the Mac sleeps 1-3 s after the lid closes, before a session can start. Standby starts one early, when the charger is unplugged or the hotspot comes into range on battery, and the lid close extends it to the auto-start duration. If the lid stays open it ends quietly when the standby duration is up.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextField("Script to run on lid close/open (path)", text: bind(\.lidHookScript))
+            if let problem = lidHookProblem {
+                Text(problem).font(.caption).foregroundStyle(.orange)
+            }
+            Text("Runs on every lid close and open, with or without a session, as: script closed|open active|idle. The same values are in INSOMNIA_LID and INSOMNIA_SESSION. It is stopped after \(Int(LidHook.timeout)) s, never holds up the lid actions, and its failures only go to insomnia.log.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } header: {
+            Text("Lid hook and auto-start")
+        }
+    }
+
+    private var autoStartHoursRange: ClosedRange<Int> {
+        Int(Config.autoStartDurationRange.lowerBound / 3600)...Int(Config.autoStartDurationRange.upperBound / 3600)
+    }
+
+    private var autoStartHours: Binding<Int> {
+        Binding(
+            get: { Int((manager.config.effectiveAutoStartDuration / 3600).rounded()) },
+            set: { hours in update { $0.autoStartDuration = TimeInterval(hours) * 3600 } }
+        )
+    }
+
+    private var standbyMinutesRange: ClosedRange<Int> {
+        Int(Config.standbyDurationRange.lowerBound / 60)...Int(Config.standbyDurationRange.upperBound / 60)
+    }
+
+    private var standbyMinutes: Binding<Int> {
+        Binding(
+            get: { Int((manager.config.effectiveStandbyDuration / 60).rounded()) },
+            set: { minutes in update { $0.standbyDuration = TimeInterval(minutes) * 60 } }
+        )
+    }
+
+    /// Why the hook path would be skipped, or nil when it is off or usable.
+    private var lidHookProblem: String? {
+        let script = manager.config.lidHookScript
+        guard !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        guard let call = LidHook.invocation(script: script, closed: true, sessionActive: false) else {
+            return "Use an absolute path without \"=\"; the hook is skipped."
+        }
+        guard FileManager.default.isExecutableFile(atPath: call.script) else {
+            return "Not an executable file (chmod +x); the hook is skipped."
+        }
+        return nil
     }
 
     private var appSection: some View {

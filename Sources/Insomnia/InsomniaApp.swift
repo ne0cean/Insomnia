@@ -25,10 +25,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let loginItem = LoginItem()
     private var statusItem: StatusItemController?
     private var settingsWindow: SettingsWindow?
+    /// Lid events between sessions: the lid hook and auto-start on lid close.
+    private var idleLid: IdleLidWatcher?
+    /// Sleep held ahead of the lid close (`Config.standbyBeforeLidClose`).
+    private var standby: StandbyArmer?
     private var terminating = false
 
     override init() {
         let manager = SessionManager.live()
+        // URL commands (scripts) queue behind the launch reconcile below.
+        manager.holdCommandsForLaunch()
         self.manager = manager
         secrets = KeychainHotspotSecretStore(keychain: KeychainStore()) {
             manager.config.hotspotSSID
@@ -84,7 +90,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = StatusItemController(manager: manager, status: status) { [weak settings] in
             settings?.show()
         }
-        Task { await manager.reconcile() }
+        Task {
+            await manager.reconcile()
+            manager.openCommands()
+        }
+        let watcher = IdleLidWatcher(manager: manager)
+        watcher.start()
+        idleLid = watcher
+        let armer = StandbyArmer(manager: manager)
+        armer.start()
+        standby = armer
+    }
+
+    /// `insomnia://` URLs (`URLCommand`). Launch Services starts the app
+    /// first when it is not running, so a script can start a session from
+    /// cold. A start while a session is active is ignored, as from the menu.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            guard let command = URLCommand.parse(url) else {
+                Log.error("url scheme: ignored \(url.absoluteString)")
+                continue
+            }
+            handle(command)
+        }
+    }
+
+    /// Each command goes to the manager, which decides in its own order
+    /// (`SessionManager.perform`); nothing is pre-checked here against a
+    /// session state a queued command is about to change.
+    private func handle(_ command: URLCommand) {
+        manager.enqueue(command)
     }
 
     /// Quitting always ends the session (spec 1). Terminate is deferred until

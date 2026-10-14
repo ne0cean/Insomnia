@@ -19,6 +19,10 @@ enum EndReason: String, Sendable {
     /// may still have been applied, so the start is undone from the journal
     /// like an end rather than rolled back from memory.
     case startFailed
+    /// A standby session (`StandbyArmer`) reached its deadline with the lid
+    /// still open: sleep was held for nothing, which is the expected case
+    /// of a charger unplugged at the desk. Logged, not announced.
+    case standbyExpired
 }
 
 /// What `end` achieved. Callers that are about to quit need to know whether
@@ -1166,7 +1170,7 @@ final class SessionManager {
     /// setting may have been applied before the error or timeout), so it is
     /// undone from the journal like an end, and the journal keeps the entry
     /// until that undo is confirmed.
-    func start(duration: TimeInterval) async {
+    func start(duration: TimeInterval, asStandby: Bool = false) async {
         guard !quitRequested else {
             Log.info("start ignored: quit requested")
             return
@@ -1176,13 +1180,15 @@ final class SessionManager {
             return
         }
         let ticket = endTicket
-        _ = await exclusive("start") { await self.performStart(duration: duration, ticket: ticket) }
+        startsInFlight += 1
+        defer { startsInFlight -= 1 }
+        _ = await exclusive("start") { await self.performStart(duration: duration, ticket: ticket, asStandby: asStandby) }
         // A start that goes through before a refused launch reconcile runs
         // again drops that reconcile, and takes over its check.
         await settleEarlierCommand()
     }
 
-    private func performStart(duration: TimeInterval, ticket: Int) async {
+    private func performStart(duration: TimeInterval, ticket: Int, asStandby: Bool = false) async {
         guard session == nil else {
             Log.info("start ignored: session already active")
             return
@@ -1257,6 +1263,10 @@ final class SessionManager {
         }
 
         session = new
+        // Set in the same step as the session, so no command sees a standby
+        // session without its flag (a start or extend arriving in between
+        // was dropped or overwritten — review r3).
+        standby = asStandby
         lastError = nil
         countdownPaused = clamshell() == true
         foreignSleepWarning = nil
@@ -1268,14 +1278,170 @@ final class SessionManager {
         // PR3: schedule "5 minutes left" notification.
     }
 
+    /// A standby session: started by `StandbyArmer` ahead of the lid close,
+    /// extended to the auto-start duration by the close
+    /// (`promoteStandby`), ended quietly by its own deadline otherwise.
+    /// Cleared by every end. Not persisted: after a relaunch it is an
+    /// ordinary short session.
+    @ObservationIgnored private(set) var standby = false
+    /// Starts requested and not yet finished (queued or running). An end
+    /// from a script that arrives meanwhile is for the session they will
+    /// make, not a no-op (`perform(_:)`).
+    @ObservationIgnored private(set) var startsInFlight = 0
+    /// The `insomnia://` command queue (URLCommandHandling.swift).
+    @ObservationIgnored var commandTail: Task<Void, Never>?
+    @ObservationIgnored var commandGate: CommandGate?
+
+    /// `start`, and mark the session as standby if it started.
+    func startStandby(duration: TimeInterval) async {
+        guard session == nil else {
+            Log.info("standby ignored: session already active")
+            return
+        }
+        await start(duration: duration, asStandby: true)
+        guard standby, let s = session else { return }
+        Log.info("standby session until \(iso(s.endsAt))")
+        // The lid may have closed while the start was in flight (unplug, then
+        // close within seconds is the whole point): that close found no
+        // session, or no standby flag yet, so it is honoured here.
+        if clamshell() == true {
+            Log.info("standby: the lid is already closed")
+            await promoteStandby()
+        }
+    }
+
+    /// The lid closed during standby: the session becomes the auto-start
+    /// session, extended so it ends `config.effectiveAutoStartDuration`
+    /// from now. Nothing to do when the session is not a standby one.
+    func promoteStandby(to target: TimeInterval? = nil) async {
+        guard standby, let s = session else { return }
+        standby = false
+        let length = target ?? config.effectiveAutoStartDuration
+        let extra = length - s.remaining(at: clock())
+        guard extra > 0 else {
+            Log.info("standby promoted: session already runs past \(Int(length)) s")
+            return
+        }
+        Log.info("standby promoted: extending the session by \(Int(extra)) s to \(Int(length)) s")
+        await extend(by: extra)
+    }
+
+    // MARK: Pause
+
+    /// The seconds the countdown stood at when the session was paused, nil
+    /// while it runs. A paused session keeps sleep held with the countdown
+    /// standing still: the deadline on disk is rolled forward every
+    /// `pauseRollInterval` to now plus this, so the recovery agent and a
+    /// relaunch always see a deadline at most one roll past the frozen
+    /// remaining, never an open-ended hold. Not persisted: a relaunch
+    /// resumes the countdown from the rolled deadline. Every end clears it.
+    @ObservationIgnored private(set) var pausedRemaining: TimeInterval?
+    var isPaused: Bool { pausedRemaining != nil }
+    static let pauseRollInterval: TimeInterval = 60
+    @ObservationIgnored private var pauseRollTimer: Timer?
+
+    /// Freeze the countdown where it stands. Ignored without a session or
+    /// when already paused.
+    func pause() async {
+        // No pre-check outside the queue: a pause sent while a start is
+        // still in flight must wait for it, not be dropped (performPause
+        // checks under the queue).
+        let ticket = endTicket
+        _ = await exclusive("pause") { await self.performPause(ticket: ticket) }
+    }
+
+    private func performPause(ticket: Int) async {
+        guard let current = session, endTicket == ticket, !isPaused else { return }
+        // The agent enforces whatever deadline is on disk; confirm it is
+        // still loaded before that deadline starts moving out.
+        do {
+            try await backstop.arm()
+        } catch {
+            fail("could not confirm backstop: \(error.localizedDescription)")
+            return
+        }
+        guard endTicket == ticket, session == current else { return }
+        let remaining = current.remaining(at: clock())
+        pausedRemaining = remaining
+        // A paused standby is a session the user wants kept, not one the
+        // lid close should reshape.
+        standby = false
+        Log.info("session paused with \(Int(remaining)) s left")
+        rollPausedDeadline()
+        let timer = Timer(timeInterval: Self.pauseRollInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.rollPausedDeadline() }
+        }
+        timer.tolerance = 5
+        RunLoop.main.add(timer, forMode: .common)
+        pauseRollTimer = timer
+    }
+
+    /// Move the deadline on disk to now plus the frozen remaining (never past
+    /// `config.maxDuration` from now). Internal so a test can roll without
+    /// waiting out the interval. A write that fails leaves the earlier
+    /// deadline, which the next roll or the resume tries again.
+    func rollPausedDeadline() {
+        guard var updated = session, let remaining = pausedRemaining else { return }
+        let now = clock()
+        // At least two roll intervals out: the recovery agent judges the
+        // deadline with no grace, so a remaining shorter than one interval
+        // would let it end the session between rolls while the app still
+        // shows it paused.
+        let horizon = max(remaining, 2 * Self.pauseRollInterval)
+        updated.endsAt = now.addingTimeInterval(min(horizon, config.maxDuration))
+        do {
+            try store.saveSession(updated)
+        } catch {
+            Log.error("paused session: could not roll the deadline: \(error.localizedDescription)")
+            return
+        }
+        session = updated
+        Task { await armDeadline(updated.endsAt) }
+    }
+
+    /// Let the countdown run again from where it was frozen. The deadline
+    /// written is now plus the frozen remaining: at most one roll earlier
+    /// than the one on disk, and a deadline moving in is always safe.
+    func resume() async {
+        // Checked under the queue (performResume), so a resume sent right
+        // after a pause still in flight is not dropped.
+        let ticket = endTicket
+        _ = await exclusive("resume") { await self.performResume(ticket: ticket) }
+    }
+
+    private func performResume(ticket: Int) async {
+        guard var updated = session, let remaining = pausedRemaining, endTicket == ticket else { return }
+        updated.endsAt = clock().addingTimeInterval(remaining)
+        do {
+            try store.saveSession(updated)
+        } catch {
+            fail("could not write session: \(error.localizedDescription)")
+            return
+        }
+        stopPauseRoll()
+        pausedRemaining = nil
+        session = updated
+        Log.info("session resumed with \(Int(remaining)) s left, until \(iso(updated.endsAt))")
+        await armDeadline(updated.endsAt)
+    }
+
+    private func stopPauseRoll() {
+        pauseRollTimer?.invalidate()
+        pauseRollTimer = nil
+    }
+
     func extend(by extra: TimeInterval) async {
-        guard session != nil else { return }
+        // Checked under the queue (performExtend): an extend sent while a
+        // start is in flight applies to the session it makes.
         let ticket = endTicket
         _ = await exclusive("extend") { await self.performExtend(by: extra, ticket: ticket) }
     }
 
     private func performExtend(by extra: TimeInterval, ticket: Int) async {
         guard let current = session, endTicket == ticket else { return }
+        // An explicit extension is a session the user wants kept: it no
+        // longer ends quietly as a standby, and the lid close leaves it alone.
+        standby = false
         let updated = SessionMath.extended(current, by: extra, now: clock(), maxDuration: config.maxDuration)
         // The agent enforces whatever deadline is on disk; confirm it is
         // still loaded before moving that deadline out.
@@ -1298,6 +1464,14 @@ final class SessionManager {
         session = updated
         lastError = nil
         Log.info("session extended by \(Int(extra))s until \(iso(updated.endsAt))")
+        if let frozen = pausedRemaining {
+            // Paused: the extension goes into the frozen remaining, which the
+            // next roll and the resume write out; otherwise they would
+            // overwrite it.
+            pausedRemaining = frozen + updated.endsAt.timeIntervalSince(current.endsAt)
+            rollPausedDeadline()
+            return
+        }
         await armDeadline(updated.endsAt)
     }
 
@@ -1357,6 +1531,8 @@ final class SessionManager {
         stopTimers()
         countdownPaused = false
         session = nil
+        standby = false
+        pausedRemaining = nil
         // Every lid action is undone from the journal below, or by the
         // retry of this end, and Low Power Mode restored from it: a lid
         // event refused earlier, a settle pass waiting to run again and
@@ -1483,7 +1659,11 @@ final class SessionManager {
             if !agentCanFinish { scheduleEndRetry(reason) }
             return .incomplete(agentArmed: agentCanFinish)
         }
-        notifier.post(title: Self.endTitle(reason, had: had), body: endBody(reason, waiting: waiting))
+        // A standby that expired at the desk is the quiet case; it is still
+        // announced when an output device waits for its volume.
+        if reason != .standbyExpired || !waiting.isEmpty {
+            notifier.post(title: Self.endTitle(reason, had: had), body: endBody(reason, waiting: waiting))
+        }
         return .restored
     }
 
@@ -2885,10 +3065,12 @@ final class SessionManager {
             countdownText = ""
             return
         }
-        let remaining = s.remaining(at: clock())
+        // Paused: the frozen remaining, not the rolled deadline's.
+        let remaining = pausedRemaining ?? s.remaining(at: clock())
         let minute = SessionMath.formatRemaining(remaining)
         if remainingText != minute { remainingText = minute }
-        let second = SessionMath.formatCountdown(remaining: remaining, shape: s.countdownShape)
+        let digits = SessionMath.formatCountdown(remaining: remaining, shape: s.countdownShape)
+        let second = isPaused ? Self.pausedCountdownPrefix + digits : digits
         if countdownText != second { countdownText = second }
     }
 
@@ -2923,7 +3105,13 @@ final class SessionManager {
         let timer = Timer(fire: endsAt, interval: 0, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 guard let self, let s = self.session, s.isExpired(at: self.clock()) else { return }
-                await self.end(reason: .timer)
+                // A paused session whose rolled deadline passed (the roll
+                // timer did not run, say across a sleep) is rolled, not ended.
+                if self.isPaused {
+                    self.rollPausedDeadline()
+                    return
+                }
+                await self.end(reason: self.standby ? .standbyExpired : .timer)
             }
         }
         timer.tolerance = 1
@@ -2954,11 +3142,15 @@ final class SessionManager {
         countdownTimer = timer
     }
 
+    /// What the status item shows before the digits while paused.
+    static let pausedCountdownPrefix = "\u{23F8} "
+
     private func stopTimers() {
         deadlineTimer?.invalidate()
         deadlineTimer = nil
         countdownTimer?.invalidate()
         countdownTimer = nil
+        stopPauseRoll()
     }
 
     private func persistState(_ s: RuntimeState) throws {
@@ -3185,6 +3377,7 @@ final class SessionManager {
             : "A previous session left changes behind; everything has been undone."
         case .recoveryUnavailable: "Insomnia could not arm its recovery agent for the session found on disk, so it ended the session. Sleep is back to normal."
         case .startFailed: "Insomnia could not disable sleep, so no session was started. Sleep is back to normal."
+        case .standbyExpired: "The lid stayed open for the whole standby. Sleep is back to normal."
         }
     }
 }
