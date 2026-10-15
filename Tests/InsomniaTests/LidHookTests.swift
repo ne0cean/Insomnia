@@ -188,4 +188,48 @@ final class LidHookTests: XCTestCase {
         await LidHook.run(script: script.path, closed: false, sessionActive: true)
         XCTAssertFalse(FileManager.default.fileExists(atPath: out.path))
     }
+
+    /// A hook that backgrounds a long-lived child without redirecting its
+    /// output (`cmd &`) leaves that child holding the stdout/stderr pipe. The
+    /// 20 s limit must still hold, and no thread may stay pinned on the
+    /// pipe: 40 such events (80 reader threads on a pipe) used to exhaust
+    /// the 64-thread GCD pool, after which no command ran at all.
+    func testBackgroundedChildHoldingOutputDoesNotVoidTheTimeoutOrPinThreads() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lidhook-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let pids = dir.appendingPathComponent("pids.txt")
+        defer {
+            // Reap the stray sleeps whatever the outcome.
+            if let text = try? String(contentsOf: pids, encoding: .utf8) {
+                for pid in text.split(separator: "\n").compactMap({ Int32($0) }) { kill(pid, SIGKILL) }
+            }
+            try? FileManager.default.removeItem(at: dir)
+        }
+        let script = dir.appendingPathComponent("hook.sh")
+        try TestScripts.write("""
+        #!/bin/sh
+        sleep 300 &
+        echo $! >> "\(pids.path)"
+        """, to: script)
+
+        let started = Date()
+        let finished = expectation(description: "40 hooks and a follow-up command returned")
+        let outcome = OutcomeBox()
+        Task.detached {
+            await withTaskGroup(of: Void.self) { group in
+                for _ in 0..<40 {
+                    group.addTask { _ = try? await Shell.run("/bin/sh", [script.path], timeout: 5) }
+                }
+            }
+            outcome.value = try? await Shell.run("/bin/echo", ["still alive"], timeout: 5)
+            finished.fulfill()
+        }
+        await fulfillment(of: [finished], timeout: 20)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 15, "the limit did not hold: the hooks waited for their backgrounded child")
+        XCTAssertEqual(outcome.value?.stdout, "still alive\n", "a later command could not run: threads are pinned on the held pipe")
+    }
+
+    private final class OutcomeBox: @unchecked Sendable {
+        var value: ShellResult?
+    }
 }
