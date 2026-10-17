@@ -229,6 +229,39 @@ final class LidHookTests: XCTestCase {
         XCTAssertEqual(outcome.value?.stdout, "still alive\n", "a later command could not run: threads are pinned on the held pipe")
     }
 
+    /// At the limit the SIGKILL must reach the hook's whole process group,
+    /// not just the hook: a descendant that ignores SIGTERM outlives a kill
+    /// sent to the hook's pid alone, since the hook dies of the SIGTERM and
+    /// leaves nothing running to escalate on.
+    func testTimeoutKillsADescendantThatIgnoresSIGTERM() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lidhook-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let pidFile = dir.appendingPathComponent("witness.pid")
+        var witness: pid_t = 0
+        defer {
+            if witness > 0 { kill(witness, SIGKILL) }
+            try? FileManager.default.removeItem(at: dir)
+        }
+        let script = dir.appendingPathComponent("hook.sh")
+        try TestScripts.write("""
+        #!/bin/sh
+        sh -c 'trap "" TERM; exec tail -f /dev/null' >/dev/null 2>&1 &
+        echo $! > "\(pidFile.path)"
+        wait
+        """, to: script)
+
+        do {
+            _ = try await Shell.run("/bin/sh", [script.path], timeout: 1)
+            XCTFail("the hook outlived its limit without a timeout")
+        } catch ShellTimeoutError.timedOut {}
+
+        let text = try String(contentsOf: pidFile, encoding: .utf8)
+        witness = try XCTUnwrap(pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)))
+        let deadline = Date().addingTimeInterval(5)
+        while kill(witness, 0) == 0, Date() < deadline { try await Task.sleep(nanoseconds: 100_000_000) }
+        XCTAssertNotEqual(kill(witness, 0), 0, "a descendant that ignores SIGTERM survived the timeout")
+    }
+
     private final class OutcomeBox: @unchecked Sendable {
         var value: ShellResult?
     }
