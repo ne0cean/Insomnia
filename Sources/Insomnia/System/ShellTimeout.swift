@@ -35,12 +35,16 @@ extension Shell {
         return (FileHandle(fileDescriptor: fd, closeOnDealloc: true), reader)
     }
 
-    /// `Shell.run` with a wall-clock limit. On timeout the child is killed
-    /// (SIGTERM, then SIGKILL) and `ShellTimeoutError.timedOut` is thrown.
+    /// `Shell.run` with a wall-clock limit. On timeout the child's process
+    /// group is killed (SIGTERM, then SIGKILL a second later) and
+    /// `ShellTimeoutError.timedOut` is thrown. Foundation starts the child as
+    /// the leader of its own group, so both signals reach the descendants
+    /// still in it, including one that ignores SIGTERM. A descendant that left
+    /// the group (`setsid`, its own `setpgid`) is out of reach.
     /// The limit holds when the child exits but leaves descendants holding
     /// its stdout/stderr: output goes to files, so nothing waits for them.
-    /// The descendants are left alone (a hook may background a tunnel on
-    /// purpose); only the child is killed at the limit.
+    /// Descendants of a child that exits in time are left alone (a hook may
+    /// background a tunnel on purpose).
     static func run(_ exe: String, _ args: [String], timeout: TimeInterval) async throws -> ShellResult {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -71,12 +75,21 @@ extension Shell {
                 try? out.writer.close()
                 try? err.writer.close()
 
+                // Read now, while the child is alive: getpgid fails once it is
+                // reaped. Signal the group only when the child leads one apart
+                // from ours, so a negative pid can never reach this process.
+                let pid = process.processIdentifier
+                let group = getpgid(pid)
+                let target: pid_t = (group == pid && group != getpgrp()) ? -group : pid
                 let box = ProcessBox(process)
                 let killer = DispatchWorkItem {
                     guard box.process.isRunning else { return }
-                    box.process.terminate()
+                    kill(target, SIGTERM)
                     DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
-                        if box.process.isRunning { kill(box.process.processIdentifier, SIGKILL) }
+                        // To a group even after the child has exited: the
+                        // descendants that ignored SIGTERM may still be in it.
+                        // A bare pid only while it is still our child.
+                        if target < 0 || box.process.isRunning { kill(target, SIGKILL) }
                     }
                 }
                 DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
