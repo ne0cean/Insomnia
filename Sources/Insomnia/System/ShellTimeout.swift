@@ -17,8 +17,30 @@ extension Shell {
         init(_ p: Process) { process = p }
     }
 
+    /// An unlinked temp file the child writes its output to. Not a pipe: a
+    /// pipe's read end sees EOF only when every writer has closed, so a
+    /// descendant the child left running (`cmd &` without a redirect) would
+    /// hold the reader, and the timeout, until it exited. A file has no EOF to
+    /// wait for; the output is read once the child itself has exited.
+    private static func outputFile() throws -> (writer: FileHandle, reader: FileHandle) {
+        var template = Array((NSTemporaryDirectory() as NSString).appendingPathComponent("insomnia-shell-XXXXXX").utf8CString)
+        let fd = mkstemp(&template)
+        guard fd >= 0 else { throw ShellError.launchFailed(exe: "output file", underlying: String(decoding: Data(bytes: strerror(errno), count: strlen(strerror(errno))), as: UTF8.self)) }
+        let path = String(decoding: template.dropLast().map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        defer { unlink(path) }
+        guard let reader = FileHandle(forReadingAtPath: path) else {
+            close(fd)
+            throw ShellError.launchFailed(exe: "output file", underlying: "cannot reopen \(path)")
+        }
+        return (FileHandle(fileDescriptor: fd, closeOnDealloc: true), reader)
+    }
+
     /// `Shell.run` with a wall-clock limit. On timeout the child is killed
     /// (SIGTERM, then SIGKILL) and `ShellTimeoutError.timedOut` is thrown.
+    /// The limit holds when the child exits but leaves descendants holding
+    /// its stdout/stderr: output goes to files, so nothing waits for them.
+    /// The descendants are left alone (a hook may background a tunnel on
+    /// purpose); only the child is killed at the limit.
     static func run(_ exe: String, _ args: [String], timeout: TimeInterval) async throws -> ShellResult {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -26,10 +48,17 @@ extension Shell {
                 process.executableURL = URL(fileURLWithPath: exe)
                 process.arguments = args
                 process.standardInput = FileHandle.nullDevice
-                let out = Pipe()
-                let err = Pipe()
-                process.standardOutput = out
-                process.standardError = err
+                let out: (writer: FileHandle, reader: FileHandle)
+                let err: (writer: FileHandle, reader: FileHandle)
+                do {
+                    out = try outputFile()
+                    err = try outputFile()
+                } catch {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                process.standardOutput = out.writer
+                process.standardError = err.writer
                 let childExit = ProcessExit(process)
 
                 do {
@@ -38,6 +67,9 @@ extension Shell {
                     continuation.resume(throwing: ShellError.launchFailed(exe: exe, underlying: error.localizedDescription))
                     return
                 }
+                // The child has its own copies; ours would only leak.
+                try? out.writer.close()
+                try? err.writer.close()
 
                 let box = ProcessBox(process)
                 let killer = DispatchWorkItem {
@@ -49,16 +81,6 @@ extension Shell {
                 }
                 DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
 
-                let group = DispatchGroup()
-                nonisolated(unsafe) var errData = Data()
-                let errHandle = err.fileHandleForReading
-                group.enter()
-                DispatchQueue.global(qos: .userInitiated).async {
-                    errData = errHandle.readDataToEndOfFile()
-                    group.leave()
-                }
-                let outData = out.fileHandleForReading.readDataToEndOfFile()
-                group.wait()
                 childExit.wait()
                 let timedOut = !killer.isCancelled && process.terminationReason == .uncaughtSignal
                 killer.cancel()
@@ -69,8 +91,8 @@ extension Shell {
                 }
                 continuation.resume(returning: ShellResult(
                     status: process.terminationStatus,
-                    stdout: String(decoding: outData, as: UTF8.self),
-                    stderr: String(decoding: errData, as: UTF8.self)
+                    stdout: String(decoding: out.reader.readDataToEndOfFile(), as: UTF8.self),
+                    stderr: String(decoding: err.reader.readDataToEndOfFile(), as: UTF8.self)
                 ))
             }
         }
