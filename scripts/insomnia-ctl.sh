@@ -12,6 +12,9 @@
 # `open -g` hands the URL to Insomnia without bringing anything forward,
 # and launches the app first when it is not running. The app answers in
 # ~/Library/Logs/Insomnia/insomnia.log, not here.
+# `-b` names the app by bundle id: Kong's Insomnia API client also claims
+# insomnia://, and a plain `open` goes to whichever app Launch Services
+# picked as the default handler.
 set -eu
 
 usage() {
@@ -66,4 +69,4 @@ case "$cmd" in
     usage
     ;;
 esac
-open -g "$url"
+open -g -b com.kgarg.insomnia "$url"
