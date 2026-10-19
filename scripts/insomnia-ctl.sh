@@ -69,4 +69,4 @@ case "$cmd" in
     usage
     ;;
 esac
-open -g -b com.kgarg.insomnia "$url"
+open -g "$url"
