@@ -503,4 +503,29 @@ final class LoginItemTests: XCTestCase {
         XCTAssertTrue(config.launchAtLogin)
         XCTAssertEqual(config.launchAtLoginInstall, second)
     }
+
+    /// install.sh seeds config.json for a fresh install (LOGIN_SEED): the
+    /// app must read it as launch-at-login on, with no lid-close update
+    /// notice, and register its own login item once at first launch.
+    func testInstallShSeedTurnsLaunchAtLoginOnAndRegistersOnce() throws {
+        let installSh = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("scripts/install.sh")
+        let text = try String(contentsOf: installSh, encoding: .utf8)
+        let lines = text.components(separatedBy: "\n").filter { $0.hasPrefix("LOGIN_SEED='") }
+        XCTAssertEqual(lines.count, 1)
+        let seed = String(try XCTUnwrap(lines.first).dropFirst("LOGIN_SEED='".count).dropLast())
+        var config = try Store.makeDecoder().decode(Config.self, from: Data(seed.utf8))
+        XCTAssertTrue(config.launchAtLogin)
+        XCTAssertNil(config.launchAtLoginInstall)
+        XCTAssertNil(config.applyLidCloseDefaults(), "a fresh install must not get the older-build lid-close update")
+        let code = text.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("#") }.joined(separator: "\n")
+        XCTAssertFalse(code.contains("System Events"), "the app owns its login item; a second one starts a second copy")
+
+        let service = FakeLoginItemService(status: .notRegistered)
+        let item = LoginItem(service: service, install: "a@/x#1", activity: NotificationCenter())
+        XCTAssertTrue(item.healAtLaunch(config: &config))
+        XCTAssertEqual(service.registers, 1)
+        XCTAssertEqual(config.launchAtLoginInstall, "a@/x#1")
+    }
 }

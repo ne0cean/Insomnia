@@ -108,7 +108,7 @@ CANDIDATE_DIR=""
 WORK=""
 
 step() { printf '\n==> %s\n' "$*"; }
-usage() { echo "usage: $0 [--app /path/to/Insomnia.app [--allow-unverified-origin]]" >&2; }
+usage() { echo "usage: $0 [--app /path/to/Insomnia.app [--allow-unverified-origin]] [--launch-at-login | --no-launch-at-login]" >&2; }
 # A command for the user to paste, each word quoted for the shell, so a space,
 # quote or $ in a path stays part of that path.
 command_line() { local line; line="$(printf '%q ' "$@")"; printf '%s' "${line% }"; }
@@ -225,10 +225,18 @@ loaded_state() { # -> yes | no | unknown:<rc>
 
 PREBUILT=""
 ALLOW_UNVERIFIED_ORIGIN=0
+# Launch at login (config.json launchAtLogin, which the app turns into its
+# own SMAppService login item at launch): "default" seeds it on only when
+# there is no config.json yet and leaves an existing one alone (so a user who
+# turned it off keeps that); --launch-at-login also turns it on in an
+# existing config.json; --no-launch-at-login seeds nothing.
+LAUNCH_AT_LOGIN=default
 while (( $# )); do
   case "$1" in
     --app) [[ $# -ge 2 ]] || { usage; exit 2; }; PREBUILT="$2"; shift 2 ;;
     --allow-unverified-origin) ALLOW_UNVERIFIED_ORIGIN=1; shift ;;
+    --launch-at-login) LAUNCH_AT_LOGIN=on; shift ;;
+    --no-launch-at-login) LAUNCH_AT_LOGIN=off; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -1117,6 +1125,36 @@ FAIL
   exit 1
 fi
 
+# 7a. Launch at login -------------------------------------------------------
+# The app registers its own login item (SMAppService) at launch when
+# config.json says launchAtLogin, so this only sets the flag; it never adds a
+# System Events login item, which would start a second copy. The seed also
+# marks the lid-close update as applied: a config.json without that key reads
+# as one from an older build and would get the update (and its notice) on a
+# fresh install. launchAtLoginInstall stays unset, so the first launch
+# registers once and records the install.
+LOGIN_SEED='{"launchAtLogin":true,"lidCloseDefaultsApplied":true}'
+CONFIG_JSON="$APP_SUPPORT/config.json"
+if [[ "$LAUNCH_AT_LOGIN" != off ]]; then
+  if [[ ! -e "$CONFIG_JSON" ]]; then
+    seed_tmp="$APP_SUPPORT/.config.json.install.$$"
+    if printf '%s\n' "$LOGIN_SEED" > "$seed_tmp" && "$CHMOD" 600 "$seed_tmp" && "$MV" "$seed_tmp" "$CONFIG_JSON"; then
+      echo "launch at login: on (seeded $CONFIG_JSON; the app registers its login item at first launch)"
+    else
+      "$RM" -f "$seed_tmp"
+      echo "WARNING: could not seed $CONFIG_JSON; turn on Settings > Launch at login yourself." >&2
+    fi
+  elif [[ "$LAUNCH_AT_LOGIN" == on ]]; then
+    if "$PLUTIL" -replace launchAtLogin -bool true "$CONFIG_JSON"; then
+      echo "launch at login: on in the existing $CONFIG_JSON"
+    else
+      echo "WARNING: could not set launchAtLogin in $CONFIG_JSON; turn on Settings > Launch at login yourself." >&2
+    fi
+  else
+    echo "launch at login: left as set in the existing $CONFIG_JSON (--launch-at-login turns it on)"
+  fi
+fi
+
 # 7. Done --------------------------------------------------------------------
 step "Installed"
 # The uninstaller shipped beside this script: scripts/ in a checkout, the
@@ -1124,7 +1162,7 @@ step "Installed"
 UNINSTALL="$SCRIPT_DIR/uninstall.sh"
 cat <<NEXT
 Next steps:
-  1. Launch:            $(command_line open "$APP")
+  1. Launch:            $(command_line open "$APP")   (once; it starts at login after that)
   2. Optional:          System Settings > Wi-Fi > Ask to join hotspots: Automatically
   3. Config lives at:   $APP_SUPPORT/config.json
   4. Logs:              $LOG_DIR/insomnia.log
