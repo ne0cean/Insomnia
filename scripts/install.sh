@@ -1138,7 +1138,7 @@ CONFIG_JSON="$APP_SUPPORT/config.json"
 if [[ "$LAUNCH_AT_LOGIN" != off ]]; then
   if [[ ! -e "$CONFIG_JSON" ]]; then
     seed_tmp="$APP_SUPPORT/.config.json.install.$$"
-    if printf '%s\n' "$LOGIN_SEED" > "$seed_tmp" && "$MV" "$seed_tmp" "$CONFIG_JSON"; then
+    if printf '%s\n' "$LOGIN_SEED" > "$seed_tmp" && "$CHMOD" 600 "$seed_tmp" && "$MV" "$seed_tmp" "$CONFIG_JSON"; then
       echo "launch at login: on (seeded $CONFIG_JSON; the app registers its login item at first launch)"
     else
       "$RM" -f "$seed_tmp"

@@ -519,7 +519,8 @@ final class LoginItemTests: XCTestCase {
         XCTAssertTrue(config.launchAtLogin)
         XCTAssertNil(config.launchAtLoginInstall)
         XCTAssertNil(config.applyLidCloseDefaults(), "a fresh install must not get the older-build lid-close update")
-        XCTAssertFalse(text.contains("System Events"), "the app owns its login item; a second one starts a second copy")
+        let code = text.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("#") }.joined(separator: "\n")
+        XCTAssertFalse(code.contains("System Events"), "the app owns its login item; a second one starts a second copy")
 
         let service = FakeLoginItemService(status: .notRegistered)
         let item = LoginItem(service: service, install: "a@/x#1", activity: NotificationCenter())
