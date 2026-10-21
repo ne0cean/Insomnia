@@ -3,15 +3,20 @@
 # source installs, and .github/workflows/release.yml runs it for the
 # downloadable package, so both produce the same bundle.
 #
-# Usage: scripts/build-app.sh --output DIR
+# Usage: scripts/build-app.sh --output DIR [--sign IDENTITY]
 #   Writes DIR/Insomnia.app, replacing a bundle already at that path. DIR is
 #   created if needed. Prints the bundle path last.
 #
-# The signature is always ad-hoc (`codesign --sign -`): releases are ad-hoc
-# signed and not notarized (docs/releasing.md). It identifies only this build
-# (its cdhash), and macOS blocks the first launch of a downloaded copy until
-# the user allows it. The bundle has no nested code, so there is no --deep;
-# backstop.sh under Contents/Resources is sealed as a resource.
+# The signature is ad-hoc (`codesign --sign -`) unless --sign names a
+# codesign identity: releases are ad-hoc signed and not notarized
+# (docs/releasing.md) and the release workflow passes no --sign. Ad-hoc
+# identifies only this build (its cdhash), and macOS blocks the first launch
+# of a downloaded copy until the user allows it. --sign exists for a source
+# build on one's own Mac (scripts/make-local-signing-identity.sh): a fixed
+# self-signed identity keeps the designated requirement the same across
+# rebuilds, so the keychain item ACL still accepts a new build. Nothing is
+# read from the environment. The bundle has no nested code, so there is no
+# --deep; backstop.sh under Contents/Resources is sealed as a resource.
 set -euo pipefail
 
 # Fixed tool paths: never taken from PATH. Tests patch these lines in a
@@ -26,11 +31,13 @@ CHMOD=/bin/chmod
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-usage() { echo "usage: $0 --output DIR" >&2; }
+usage() { echo "usage: $0 --output DIR [--sign IDENTITY]" >&2; }
 OUTPUT=""
+SIGN_IDENTITY="-"
 while (( $# )); do
   case "$1" in
     --output) [[ $# -ge 2 ]] || { usage; exit 2; }; OUTPUT="$2"; shift 2 ;;
+    --sign) [[ $# -ge 2 && -n "$2" ]] || { usage; exit 2; }; SIGN_IDENTITY="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -79,8 +86,12 @@ step "Assembling $APP"
 "$PLUTIL" -lint "$APP/Contents/Info.plist" >/dev/null
 
 # 3. Sign --------------------------------------------------------------------
-step "Signing ad-hoc (this build is identified only by its cdhash)"
-"$CODESIGN" --force --sign - "$APP"
+if [[ "$SIGN_IDENTITY" == "-" ]]; then
+  step "Signing ad-hoc (this build is identified only by its cdhash)"
+else
+  step "Signing with identity \"$SIGN_IDENTITY\""
+fi
+"$CODESIGN" --force --sign "$SIGN_IDENTITY" "$APP"
 "$CODESIGN" --verify --strict "$APP"
 "$CODESIGN" -dvv "$APP" 2>&1 | grep -E '^(Identifier|Signature|Authority|TeamIdentifier|CDHash)=' || true
 echo "$APP"

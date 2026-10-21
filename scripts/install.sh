@@ -12,7 +12,11 @@
 # Where the bundle comes from:
 #   ./scripts/install.sh                      builds it from this checkout
 #                                             (scripts/build-app.sh, ad-hoc
-#                                             signed); only from a checkout's
+#                                             signed unless --sign IDENTITY
+#                                             names a local codesign identity,
+#                                             which also re-signs the checked
+#                                             copy of an --app bundle, see
+#                                             docs/install.md); only from a checkout's
 #                                             scripts/ folder (in_checkout)
 #   ./install.sh --app /path/to/Insomnia.app  installs a prebuilt bundle, such
 #                                             as the one in a release zip
@@ -108,7 +112,8 @@ CANDIDATE_DIR=""
 WORK=""
 
 step() { printf '\n==> %s\n' "$*"; }
-usage() { echo "usage: $0 [--app /path/to/Insomnia.app [--allow-unverified-origin]] [--launch-at-login | --no-launch-at-login]" >&2; }
+usage() { echo "usage: $0 [--app /path/to/Insomnia.app [--allow-unverified-origin]] [--launch-at-login | --no-launch-at-login]
+       either form also takes --sign IDENTITY (a local codesign identity)" >&2; }
 # A command for the user to paste, each word quoted for the shell, so a space,
 # quote or $ in a path stays part of that path.
 command_line() { local line; line="$(printf '%q ' "$@")"; printf '%s' "${line% }"; }
@@ -225,6 +230,11 @@ loaded_state() { # -> yes | no | unknown:<rc>
 
 PREBUILT=""
 ALLOW_UNVERIFIED_ORIGIN=0
+# Codesign identity for a source build: "-" (ad-hoc) unless --sign names
+# one. Nothing is read from the environment, so an INSOMNIA_SIGN_IDENTITY
+# left over from older instructions changes nothing.
+SIGN_IDENTITY="-"
+SIGN_OPTION=0
 # Launch at login (config.json launchAtLogin, which the app turns into its
 # own SMAppService login item at launch): "default" seeds it on only when
 # there is no config.json yet and leaves an existing one alone (so a user who
@@ -234,6 +244,7 @@ LAUNCH_AT_LOGIN=default
 while (( $# )); do
   case "$1" in
     --app) [[ $# -ge 2 ]] || { usage; exit 2; }; PREBUILT="$2"; shift 2 ;;
+    --sign) [[ $# -ge 2 && -n "$2" ]] || { usage; exit 2; }; SIGN_IDENTITY="$2"; SIGN_OPTION=1; shift 2 ;;
     --allow-unverified-origin) ALLOW_UNVERIFIED_ORIGIN=1; shift ;;
     --launch-at-login) LAUNCH_AT_LOGIN=on; shift ;;
     --no-launch-at-login) LAUNCH_AT_LOGIN=off; shift ;;
@@ -377,6 +388,18 @@ see the README), then rerun with the flag that says so:
 REFUSE
     exit 1
   fi
+  # --sign: the private copy, just verified intact, is re-signed with the
+  # named local identity, so its designated requirement names that
+  # certificate and the next release installed the same way satisfies the
+  # same keychain item ACL (docs/install.md). The download itself is never
+  # touched.
+  if (( SIGN_OPTION )); then
+    step "Re-signing the checked copy with identity \"$SIGN_IDENTITY\""
+    if ! "$CODESIGN" --force --sign "$SIGN_IDENTITY" "$CHECKED_APP" || ! "$CODESIGN" --verify --strict "$CHECKED_APP"; then
+      echo "could not re-sign the checked copy of $PREBUILT with \"$SIGN_IDENTITY\" (scripts/make-local-signing-identity.sh creates it). Nothing was changed." >&2
+      exit 1
+    fi
+  fi
   SOURCE_APP="$CHECKED_APP"
 else
   if ! in_checkout || [[ ! -f "$SCRIPT_DIR/build-app.sh" ]]; then
@@ -387,7 +410,7 @@ else
     exit 1
   fi
   BUILD_DIR="$("$MKTEMP" -d)"
-  "$SCRIPT_DIR/build-app.sh" --output "$BUILD_DIR"
+  "$SCRIPT_DIR/build-app.sh" --output "$BUILD_DIR" --sign "$SIGN_IDENTITY"
   SOURCE_APP="$BUILD_DIR/Insomnia.app"
 fi
 
@@ -480,10 +503,18 @@ BACKSTOP="$NEW_APP/Contents/Resources/backstop.sh"
 echo "signed $("$CODESIGN" -dv "$NEW_APP" 2>&1 | grep -i identifier || true)"
 # What the agent pins: the bundle's designated requirement, in the form
 # `codesign -d -r-` prints (an implicit one carries a leading "# "). For an
-# ad-hoc signature, which source builds and releases have, that is the cdhash
-# of this build, so no other build and no edited bundle satisfies it. A
-# bundle signed with a certificate pins what its own signature declares
-# instead. It does not depend on the path, so it still holds
+# ad-hoc signature, which releases and default source builds have, that is
+# the cdhash of this build, so no other build and no edited bundle satisfies
+# it. A bundle signed with a certificate (--sign) pins what its own signature
+# declares instead: `identifier "..." and certificate leaf = H"<cert hash>"`,
+# which holds for any build signed with that exact certificate. An edited
+# bundle still fails the agent's strict verify (resource seal and code
+# signature), and a bundle signed by any other certificate fails the leaf
+# hash; but whoever can use the private key can sign a bundle that passes.
+# That gains nothing over the account itself: the sudoers rule grants the
+# four pmset commands to $USER directly, not to the agent, so a bundle that
+# passes runs backstop.sh with no more than the user already has. It does
+# not depend on the path, so it still holds
 # once the bundle is at $APP. The app reads the same text through the
 # Security framework (CodeRequirement.swift) to recognise this plist.
 REQUIREMENT="$("$CODESIGN" -d -r- "$NEW_APP" 2>&1 | sed -n 's/^#\{0,1\} *designated => //p' | head -n 1)"
