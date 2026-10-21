@@ -4764,6 +4764,54 @@ final class RecoveryScriptTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fx.appsDir.path), ["Insomnia.app"])
     }
 
+    /// `--sign IDENTITY` reaches build-app.sh for a source build; an
+    /// INSOMNIA_SIGN_IDENTITY in the environment changes nothing.
+    func testInstallFromSourceSignsWithTheIdentityGivenBySignOnly() throws {
+        try fx.prepareInstall()
+        fx.setMode("launchctl", "loaded")
+
+        let r = try fx.run(fx.installRedirected, ["--sign", "Insomnia Local Signing"], extraEnvironment: ["USER": "tester"])
+
+        XCTAssertEqual(r.status, 0, r.stderr + r.stdout)
+        XCTAssertTrue(fx.calls().contains { $0.hasPrefix("codesign --force --sign Insomnia Local Signing ") }, "\(fx.calls())")
+        XCTAssertFalse(fx.calls().contains { $0.hasPrefix("codesign --force --sign - ") }, "\(fx.calls())")
+    }
+
+    func testInstallIgnoresASigningIdentityInTheEnvironment() throws {
+        try fx.prepareInstall()
+        fx.setMode("launchctl", "loaded")
+
+        let r = try fx.run(fx.installRedirected, extraEnvironment: ["USER": "tester", "INSOMNIA_SIGN_IDENTITY": "Insomnia Local Signing"])
+
+        XCTAssertEqual(r.status, 0, r.stderr + r.stdout)
+        XCTAssertTrue(fx.calls().contains { $0.hasPrefix("codesign --force --sign - ") }, "ad-hoc: \(fx.calls())")
+    }
+
+    /// --sign with --app re-signs the private copy only after it passed the
+    /// deep verify, then verifies it again; the bundle passed in is not
+    /// re-signed. Without --sign the bundle is installed as signed
+    /// (testInstallFromPrebuiltAppVerifiesItBeforeSudoAndInstallsItWithoutBuilding).
+    func testInstallResignsTheCheckedCopyOfAPrebuiltBundleWithSign() throws {
+        try fx.prepareInstall()
+        let prebuilt = try fx.writePrebuiltApp()
+        fx.setMode("launchctl", "loaded")
+
+        let r = try fx.run(fx.installRedirected, ["--allow-unverified-origin", "--app", prebuilt.path, "--sign", "Insomnia Local Signing"], extraEnvironment: ["USER": "tester"])
+
+        XCTAssertEqual(r.status, 0, r.stderr + r.stdout)
+        let calls = fx.calls()
+        let copy = try checkedCopy(of: prebuilt)
+        let deep = try XCTUnwrap(calls.firstIndex(of: "codesign --verify --strict --deep \(copy)"), "\(calls)")
+        let sign = try XCTUnwrap(calls.firstIndex(of: "codesign --force --sign Insomnia Local Signing \(copy)"), "\(calls)")
+        let again = try XCTUnwrap(calls.lastIndex(of: "codesign --verify --strict \(copy)"), "\(calls)")
+        let visudo = try XCTUnwrap(calls.firstIndex { $0.hasPrefix("sudo visudo") }, "\(calls)")
+        XCTAssertLessThan(deep, sign, "verified before it is re-signed: \(calls)")
+        XCTAssertLessThan(sign, again)
+        XCTAssertLessThan(again, visudo, "re-signed before the password prompt: \(calls)")
+        XCTAssertFalse(calls.contains { $0.hasPrefix("codesign --force") && $0.hasSuffix(prebuilt.path) }, "the bundle passed in is not re-signed: \(calls)")
+        XCTAssertFalse(calls.contains { $0.hasPrefix("swift") }, "nothing is built: \(calls)")
+    }
+
     func testInstallRejectsUnknownArguments() throws {
         try fx.prepareInstall()
 

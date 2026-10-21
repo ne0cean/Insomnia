@@ -146,6 +146,30 @@ a `build-app.sh` was added to its folder after unpacking. A checkout of
 `v0.1.0` has the installer of that release; its README describes it.
 [docs/releasing.md](releasing.md) describes the release pipeline.
 
+### Keep the hotspot password across rebuilds
+
+An ad-hoc signature identifies only one build (its cdhash), and the hotspot
+password's keychain item trusts only the build that saved it. After every
+rebuild the failover logs "This build of Insomnia can't read the saved hotspot
+password" until the password is entered again. To avoid that on your own Mac,
+create a self-signed signing identity once and sign source builds with it:
+
+```bash
+./scripts/make-local-signing-identity.sh          # once, from a checkout; does nothing if it exists
+./scripts/install.sh --sign "Insomnia Local Signing"
+# or, for a release zip: the checked private copy is re-signed, the download is not
+./install.sh --allow-unverified-origin --app "$PWD/Insomnia.app" --sign "Insomnia Local Signing"
+```
+
+The designated requirement then names that certificate
+(`identifier "com.kgarg.insomnia" and certificate leaf = H"..."`), which every
+build signed with it satisfies, so the keychain keeps trusting new builds. Save
+the password once more after the first such install. No trust settings are
+added. The recovery agent pins the same requirement; that admits any bundle
+signed with this key, which grants nothing beyond your account, since the
+sudoers rule already gives your user the four `pmset` commands. Without
+`--sign`, source builds and `--app` installs stay ad-hoc, and releases always are.
+
 ## What gets installed
 
 This describes releases built by the Release workflow and builds of the
