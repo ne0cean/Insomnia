@@ -371,7 +371,11 @@ final class ReleaseWorkflowTests: XCTestCase {
         for absent in ["INSOMNIA_SIGN_IDENTITY", "--options", "--timestamp"] {
             XCTAssertFalse(build.contains(absent), "build-app.sh contains \(absent)")
         }
-        XCTAssertTrue(build.contains(#""$CODESIGN" --force --sign - "$APP""#), "build-app.sh signs ad-hoc")
+        // Ad-hoc unless --sign names a local identity, and the workflow never
+        // passes --sign (PackagingTests checks both signing paths).
+        XCTAssertTrue(build.contains(#"SIGN_IDENTITY="-""#), "build-app.sh signs ad-hoc by default")
+        XCTAssertTrue(build.contains(#""$CODESIGN" --force --sign "$SIGN_IDENTITY" "$APP""#), "build-app.sh signs with that default")
+        XCTAssertFalse(text.contains("--sign"), "release.yml passes no --sign")
         let install = try String(contentsOf: repo.appendingPathComponent("scripts/install.sh"), encoding: .utf8)
         for absent in ["spctl", "SPCTL", "EXPECTED_TEAM_ID", "TeamIdentifier"] {
             XCTAssertFalse(install.contains(absent), "install.sh contains \(absent)")
