@@ -448,6 +448,35 @@ final class PackagingTests: XCTestCase {
         }
     }
 
+    /// `--sign IDENTITY` (a source build on one's own Mac, see
+    /// make-local-signing-identity.sh) signs with that identity, so the
+    /// designated requirement names the certificate and survives rebuilds.
+    /// `--sign` without a value is a usage error and builds nothing.
+    func testBuildAppSignsWithTheIdentityNamedBySign() throws {
+        let (script, calls) = try patchedBuildApp(recordingCodesign: true)
+        let out = scratch.appendingPathComponent("out", isDirectory: true)
+        let bundle = out.appendingPathComponent("Insomnia.app").path
+
+        let r = try run("/bin/bash", [script.path, "--output", out.path, "--sign", "Insomnia Local Signing"], environment: ["PATH": "/usr/bin:/bin", "HOME": scratch.path])
+
+        XCTAssertEqual(r.status, 0, r.output)
+        let recorded = try String(contentsOf: calls, encoding: .utf8).components(separatedBy: "\n").filter { $0.hasPrefix("codesign") }
+        XCTAssertEqual(recorded, [
+            "codesign --force --sign Insomnia Local Signing \(bundle)",
+            "codesign --verify --strict \(bundle)",
+            "codesign -dvv \(bundle)",
+        ])
+        XCTAssertTrue(r.output.contains("Signing with identity \"Insomnia Local Signing\""), r.output)
+
+        try? FileManager.default.removeItem(at: calls)
+        for args in [["--sign"], ["--sign", ""]] {
+            let bad = try run("/bin/bash", [script.path, "--output", out.path] + args, environment: ["PATH": "/usr/bin:/bin", "HOME": scratch.path])
+            XCTAssertEqual(bad.status, 2, "\(args): \(bad.output)")
+            XCTAssertTrue(bad.output.contains("usage:"), bad.output)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: calls.path), "nothing was built or signed")
+    }
+
     /// Every file build-app.sh removes, creates or copies goes through its
     /// fixed-path tools: `rm`, `mkdir`, `cp` and `chmod` placed first on
     /// PATH are never run, and the recorded tools are.
